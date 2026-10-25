@@ -14,7 +14,7 @@
 
 *{box-sizing:border-box}
 [hidden]{display:none!important}
-html,body{height:100%;margin:0;overflow:hidden;overscroll-behavior:none}
+html,body{height:100%;margin:0;overflow:hidden;overscroll-behavior:none;touch-action:manipulation}
 body{background:var(--bg);color:var(--ink);font-family:var(--body);font-size:15px;line-height:1.45;-webkit-tap-highlight-color:transparent}
 img{max-width:100%}
 svg{fill:currentColor}
@@ -226,17 +226,9 @@ dialog.sheet::backdrop{background:rgb(0 0 0/.4)}
 .pick.dim{opacity:.5;cursor:default}
 
 @media (prefers-reduced-motion:reduce){#waveTop{transition:none}.wave.loading canvas{animation:none}.backdrop i{transition:none}.spin,li.playing .eq i{animation:none}dialog.sheet[open],.toast{animation:none}}
-/* wishlist */
-.wlist{display:flex;flex-direction:column;margin-inline:-10px;min-height:120px}
-.wlist .sub2{padding:8px 10px}
-.wrow{display:flex;align-items:center;gap:12px;min-height:60px;padding:6px 0 6px 10px;border-radius:14px}
-.wrow .meta{flex:1}
-.wrow .thumb>span{display:grid;place-items:center}
-.wrow.have .lt::after{content:" ¹3";color:var(--accent)}
-.wrow .ic.dim{color:var(--muted)}
-.wrow .ic.wadd{background:var(--chip);color:var(--ink)}
-.wrow .ic.wadd.on{background:var(--accent);color:var(--accent-ink)}
-.wartist{display:block;text-align:left;max-width:100%;color:var(--accent);padding:2px 0;margin:-2px 0}
-.wartist .walb{color:var(--muted)}
-.whead{display:flex;align-items:center;gap:6px;padding:0 0 4px 0}
-.whead .lt{font-family:var(--display);font-size:1.05rem}
+/* iPhone zooms into any text box under 16px: keep them at 16px */
+input,textarea,select,.field,.search input{font-size:16px}
+/* instant press feedback (transform only, cheap) */
+.ic,.chip,.tab,.btn,.act,#list .main{transition:transform .08s ease-out,background .15s}
+.ic:active,.chip:active,.tab:active,.btn:active{transform:scale(.92)}
+.act:active,#list .main:active{transform:scale(.98)}

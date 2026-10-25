@@ -37,6 +37,10 @@ the device.
   covers are capped at 512px and each track has a 128px `thumb` used in the list (old tracks get one
   in idle time, only while paused); list rows use `content-visibility:auto`; animations use transform only.
   Keep it that way: avoid animating layout properties or putting full-size images in the list.
+- Tap responsiveness (iPhone, 2026-10-25): `touch-action:manipulation` on html, a passive touchstart listener so
+  :active works, scale-on-press feedback, play/pause icon updates before `audio.play()` resolves (`setPlayingUI(true)`),
+  `load()` starts the sound first and defers the rest a frame, and the waveform waits ~1.5 s after a song change
+  (`calm()`) before decoding. All text inputs are 16px (iOS zooms below that) and the viewport has maximum-scale=1.
 - iPhone background/lock stutter (user reported): `navigator.audioSession.type='playback'` (Safari 16.4+),
   `<audio preload="auto">`, and a single delayed `ac.resume()` (no tight resume loop) when iOS suspends the
   AudioContext. Not verifiable on desktop; needs testing on a real iPhone.
@@ -61,16 +65,9 @@ the device.
   .lrc/.txt). Stored as `t.lyrics` (string) via `edits`. `parseLyrics()` handles LRC ([mm:ss.xx], multiple
   stamps, [offset:]); ≥3 timed lines = synced. Lyrics view (`#lyrics`) replaces tabs+list while open; current
   line highlighted + auto-scrolled (paused 4 s after user scroll), tap a line to seek. Search also matches lyrics.
-- Wishlist (2026-10-25, heart icon in the top bar): search new songs with Apple's public iTunes Search API plus Deezer
-  (`api.deezer.com`, via JSONP because it sends no CORS headers), results merged turn by turn and de-duplicated
-  (same title + main artist, or same title + length within 2 s); MusicBrainz (CORS ok, ~1 req/s limit, no covers) is
-  added only when fewer than 10 results. Artist pages: Apple lookup or Deezer `/artist/{id}/top`. Original note:
-  (`itunes.apple.com/search`, no key, CORS ok; only the typed words are sent, no-referrer), tap + to save to
-  the wishlist (localStorage `lm-wish` [{id,title,artist,art}]), each item has Copy name and Remove. Items whose
-  title matches a library song get a check mark. Search modes: Any / Song name / Artist (iTunes `attribute`).
-  Results show artist · album; tapping the artist lists their songs (`itunes.apple.com/lookup?id=artistId`).
-  (Apple's top-charts RSS has no CORS, so charts can't be shown.) The user asked to link items to mp3juice.sc / lyricsify.com;
-  Claude declined (piracy / unlicensed lyrics), so the button only copies "title artist" to the clipboard.
+- (2026-10-25: a Wishlist with online song search (iTunes, Deezer, MusicBrainz) was added, then removed at the
+  user's request: they download songs on their computer and put them in Google Drive, then pick them from the
+  phone's file picker. Don't bring back online search unasked; the app makes no calls beyond fonts + tag library.)
 - UI uses one bottom-sheet `<dialog id="sheet">` for all menus and confirms (no `prompt()`/`confirm()`).
 - Layout (user preference): minimal, one full-height screen, the page never scrolls. Top bar (icons only),
   playlist tabs + ⋯ menu (sort, list actions), song list scrolls inside `#listwrap`, player pinned at the
@@ -83,8 +80,7 @@ the device.
   Fonts: Mitr (display) + IBM Plex Sans Thai (body) from Google Fonts.
 
 ## Hard requirements (do not break)
-1. Free and ad-free. No analytics, trackers, ads, or third-party calls beyond fonts, the tag library and the
-   iTunes Search API, Deezer API and MusicBrainz + their artwork (wishlist only, user-approved 2026-10-25).
+1. Free and ad-free. No analytics, trackers, ads, or third-party calls beyond fonts and the tag library.
 2. Local only. Never upload or send audio files or metadata anywhere.
 3. Mobile first: must work well at ~380px width, large tap targets, no horizontal scroll.
 4. Works by opening `index.html` directly or from any static host. No backend.
