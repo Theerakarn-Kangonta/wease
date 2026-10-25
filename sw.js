@@ -1,7 +1,7 @@
 /* Wease service worker: keeps the app working offline.
    It only caches the app's own files, the Google Fonts and the tag-reading library.
    Music files are never fetched or cached here: they live in IndexedDB on the device. */
-const VERSION='wease-v17';
+const VERSION='wease-v21';
 const SHELL=['./','./index.html','./style.css','./app.js','./manifest.json',
   './icons/icon.svg','./icons/icon-192.png','./icons/icon-512.png','./icons/apple-touch-icon.png'];
 const LIB='https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.5/jsmediatags.min.js';
@@ -29,7 +29,8 @@ self.addEventListener('fetch',e=>{
   const u=new URL(r.url);
   if(u.origin===location.origin){
     // app files: try the network first so updates show up, fall back to the cache when offline
-    e.respondWith(fetch(r).then(res=>{
+    // cache:'no-cache' asks the server every time, so a stale browser copy never hides an update
+    e.respondWith(fetch(r,{cache:'no-cache'}).then(res=>{
       if(res.ok){const copy=res.clone();caches.open(VERSION).then(c=>c.put(r,copy))}
       return res;
     }).catch(async()=>(await caches.match(r,{ignoreSearch:true}))||

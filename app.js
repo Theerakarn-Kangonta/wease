@@ -30,6 +30,10 @@ const I={
   image:'M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z',
   share:'M16 5l-1.42 1.42-1.59-1.59V16h-1.98V4.83L9.42 6.42 8 5l4-4 4 4zm4 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h3v2H6v11h12V10h-3V8h3a2 2 0 0 1 2 2z',
   addBox:'M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H5V5h14v14zm-8-2h2v-4h4v-2h-4V7h-2v4H7v2h4z',
+  heart:'M16.5 3c-1.74 0-3.41.81-4.5 2.09C10.91 3.81 9.24 3 7.5 3 4.42 3 2 5.42 2 8.5c0 3.78 3.4 6.86 8.55 11.54L12 21.35l1.45-1.32C18.6 15.36 22 12.28 22 8.5 22 5.42 19.58 3 16.5 3zm-4.4 15.55-.1.1-.1-.1C7.14 14.24 4 11.39 4 8.5 4 6.5 5.5 5 7.5 5c1.54 0 3.04.99 3.57 2.36h1.87C13.46 5.99 14.96 5 16.5 5c2 0 3.5 1.5 3.5 3.5 0 2.89-3.14 5.74-7.9 10.05z',
+  copy:'M16 1H4a2 2 0 0 0-2 2v14h2V3h12V1zm3 4H8a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V7a2 2 0 0 0-2-2zm0 16H8V7h11v14z',
+  back:'M20 11H7.83l5.59-5.59L12 4l-8 8 8 8 1.41-1.41L7.83 13H20v-2z',
+  close:'M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z',
   arrow:'M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z',
 };
 const ico=p=>`<svg viewBox="0 0 24 24" aria-hidden="true"><path d="${p}"/></svg>`;
@@ -1045,3 +1049,130 @@ async function makeMissingThumbs(){
     const img=document.querySelector(`#list li[data-id="${CSS.escape(t.id)}"] .thumb img`);if(img)img.src=t.thumb;
   }
 }
+
+/* ---------- wishlist ----------
+   Songs the user wants to get later. Search uses Apple's public iTunes Search API: only the typed
+   words are sent, never anything from the library. The list itself stays on the device (localStorage). */
+let wish=[];   // {id,title,artist,art}
+try{const w=JSON.parse(localStorage.getItem('lm-wish')||'[]');if(Array.isArray(w))wish=w.filter(x=>x&&x.id&&typeof x.title==='string')}catch(e){}
+const saveWish=()=>{try{localStorage.setItem('lm-wish',JSON.stringify(wish))}catch(e){}};
+const norm=s=>String(s||'').toLowerCase().replace(/\(.*?\)|\[.*?\]/g,'').replace(/[^\p{L}\p{N}]+/gu,' ').trim();
+const haveSong=w=>{const n=norm(w.title);return !!n&&tracks.some(t=>norm(t.title)===n||norm(t.name).includes(n))};
+async function copyText(s){
+  try{await navigator.clipboard.writeText(s);return true}catch(e){}
+  try{const a=h('textarea',{style:'position:fixed;opacity:0'});a.value=s;document.body.append(a);a.select();
+    const ok=document.execCommand('copy');a.remove();return ok}catch(e){return false}
+}
+/* song catalogs: Apple (iTunes Search API) + Deezer, merged; MusicBrainz fills in when those find little.
+   Only the typed words (or an artist id) are sent. */
+const artRef=w=>w.artistRef||(w.artistId?{src:'a',id:w.artistId}:null);
+const getJSON=async u=>{const r=await fetch(u,{referrerPolicy:'no-referrer',credentials:'omit'});if(!r.ok)throw new Error(r.status);return r.json()};
+// Deezer doesn't allow normal cross-site requests, but supports JSONP (its answer comes back as a script)
+function jsonp(u){return new Promise((res,rej)=>{
+  const cb='__dz'+Math.random().toString(36).slice(2),s=document.createElement('script');
+  const t=setTimeout(()=>{window[cb]=()=>{};s.remove();rej(new Error('timeout'))},9000);   // a late answer then does nothing
+  window[cb]=d=>{clearTimeout(t);delete window[cb];s.remove();d&&d.error?rej(new Error('deezer')):res(d)};
+  s.onerror=()=>{clearTimeout(t);delete window[cb];s.remove();rej(new Error('net'))};
+  s.referrerPolicy='no-referrer';s.src=u+(u.includes('?')?'&':'?')+'output=jsonp&callback='+cb;document.head.append(s)})}
+const fromApple=d=>(d.results||[]).filter(x=>x.wrapperType==='track'&&x.trackName).map(x=>({id:'a'+x.trackId,title:x.trackName,artist:x.artistName||'',
+  artistRef:x.artistId?{src:'a',id:x.artistId}:null,album:x.collectionName&&!/ - Single$/.test(x.collectionName)?x.collectionName:'',
+  art:(x.artworkUrl100||'').replace('100x100','120x120'),dur:Math.round((x.trackTimeMillis||0)/1000)}));
+const fromDeezer=d=>(d.data||[]).filter(x=>x&&x.title).map(x=>({id:'d'+x.id,title:x.title,artist:(x.artist&&x.artist.name)||'',
+  artistRef:x.artist&&x.artist.id?{src:'d',id:x.artist.id}:null,album:x.album&&x.album.title!==x.title?x.album.title:'',
+  art:(x.album&&(x.album.cover_medium||x.album.cover_small))||'',dur:x.duration||0}));
+const fromMB=d=>(d.recordings||[]).filter(x=>x.title).map(x=>({id:'m'+x.id,title:x.title,
+  artist:(x['artist-credit']||[]).map(c=>c.name+(c.joinphrase||'')).join(''),artistRef:null,
+  album:(x.releases&&x.releases[0]&&x.releases[0].title!==x.title&&x.releases[0].title)||'',art:'',dur:Math.round((x.length||0)/1000)}));
+const WISH_MODES={any:['Any','',''],song:['Song name','songTerm','recording'],artist:['Artist','artistTerm','artist']};
+async function catalogSearch(term,mode){
+  const [,attr,mbField]=WISH_MODES[mode],enc=encodeURIComponent(term),nt=norm(term);
+  const fits=w=>mode==='song'?norm(w.title).includes(nt):mode==='artist'?norm(w.artist).includes(nt):true;
+  const got=await Promise.allSettled([
+    getJSON('https://itunes.apple.com/search?media=music&entity=song&limit=30'+(attr?'&attribute='+attr:'')+'&term='+enc).then(fromApple),
+    jsonp('https://api.deezer.com/search?limit=30&q='+enc).then(d=>fromDeezer(d).filter(fits)),
+  ]);
+  const lists=got.map(g=>g.status==='fulfilled'?g.value:[]);
+  let items=mergeSongs(lists);
+  if(items.length<10){
+    const q=term.replace(/[+\-&|!(){}[\]^"~*?:\\/]/g,' ').trim();
+    try{const d=await getJSON('https://musicbrainz.org/ws/2/recording?fmt=json&limit=25&query='+encodeURIComponent(mbField?mbField+':('+q+')':q));
+      items=mergeSongs([items,fromMB(d).filter(fits)])}catch(e){if(got.every(g=>g.status==='rejected'))throw e}
+  }else if(got.every(g=>g.status==='rejected'))throw new Error('offline');
+  return items;
+}
+// take turns from each list and skip repeats: same title with the same main artist, or same title and
+// length within 2 s (catches one artist spelled two ways, e.g. in English on Apple and in Thai on Deezer)
+function mergeSongs(lists){
+  const seen=new Set(),lens=new Map(),out=[],key=w=>norm(w.title)+'|'+norm(w.artist).split(' ').slice(0,2).join(' ');
+  for(let i=0;lists.some(l=>i<l.length);i++)for(const l of lists){
+    const w=l[i];if(!w)continue;const k=key(w),t=norm(w.title),ds=lens.get(t)||[];
+    if(seen.has(k)||(w.dur>0&&ds.some(d=>Math.abs(d-w.dur)<=2)))continue;
+    seen.add(k);if(w.dur>0)lens.set(t,[...ds,w.dur]);out.push(w)}
+  return out;
+}
+async function artistSongs(ref){
+  if(ref.src==='d')return fromDeezer(await jsonp('https://api.deezer.com/artist/'+encodeURIComponent(ref.id)+'/top?limit=50'));
+  return fromApple(await getJSON('https://itunes.apple.com/lookup?entity=song&limit=50&id='+encodeURIComponent(ref.id)));
+}
+function wishRow(w,inList,onArtist){
+  const art=w.art?h('img',{src:w.art,alt:'',loading:'lazy',decoding:'async',referrerpolicy:'no-referrer',onerror:e=>e.target.replaceWith(h('span',{html:ico(I.note)}))}):h('span',{html:ico(I.note)});
+  const who=w.artist||'Unknown artist';
+  // tapping the artist shows their songs (handy when you only knew the song name)
+  const sub=onArtist&&artRef(w)
+    ?h('button',{type:'button',class:'la wartist','aria-label':'More songs by '+who,onclick:()=>onArtist(w)},who,w.album?h('span',{class:'walb'},' · '+w.album):null)
+    :h('span',{class:'la'},who,w.album?' · '+w.album:'');
+  return h('div',{class:'wrow'+(inList&&haveSong(w)?' have':'')},h('span',{class:'thumb'},art),
+    h('span',{class:'meta'},h('span',{class:'lt'},w.title),sub));
+}
+function openWish(){
+  const q=h('input',{class:'field',type:'search',placeholder:'Search new songs','aria-label':'Search new songs',autocomplete:'off',enterkeyhint:'search'});
+  const box=h('div',{class:'wlist'});
+  let timer=0,seq=0,mode='any',lastItems=null;
+  const modes=chips(Object.entries(WISH_MODES).map(([k,[l]])=>[k,l]),mode,v=>{mode=v;const s=q.value.trim();if(s)search(s)});
+  const msg=t=>box.replaceChildren(h('p',{class:'sub2'},t));
+  const drawList=()=>{
+    box.replaceChildren();lastItems=null;
+    if(!wish.length){msg('Your wishlist is empty');return}
+    for(const w of wish){
+      const row=wishRow(w,true,showArtist);
+      row.append(
+        h('button',{type:'button',class:'ic','aria-label':'Copy “'+w.title+'”',html:ico(I.copy),onclick:async()=>{
+          toast(await copyText(w.title+' '+w.artist)?'Copied: '+w.title+' – '+w.artist:'Could not copy')}}),
+        h('button',{type:'button',class:'ic dim','aria-label':'Remove “'+w.title+'”',html:ico(I.close),onclick:()=>{
+          wish=wish.filter(x=>x.id!==w.id);saveWish();drawList()}}));
+      box.append(row);
+    }
+  };
+  const drawResults=(items,head)=>{
+    box.replaceChildren();lastItems=items;
+    if(head)box.append(head);
+    if(!items.length){box.append(h('p',{class:'sub2'},'No songs found'));return}
+    for(const w of items){
+      const row=wishRow(w,false,showArtist),inWish=()=>wish.some(x=>x.id===w.id);
+      const b=h('button',{type:'button',class:'ic wadd','aria-label':'Add to wishlist',onclick:()=>{
+        if(inWish())wish=wish.filter(x=>x.id!==w.id);else{const{dur,...keep}=w;wish.unshift(keep)}
+        saveWish();upd()}});
+      const upd=()=>{const on=inWish();b.innerHTML=ico(on?I.check:I.plus);b.classList.toggle('on',on);b.setAttribute('aria-pressed',String(on))};
+      upd();row.append(b);box.append(row);
+    }
+  };
+  const fail=my=>{if(my===seq)msg('Can’t search right now. Check your connection')};
+  const search=async term=>{
+    const my=++seq;msg('Searching…');
+    try{const items=await catalogSearch(term,mode);if(my===seq)drawResults(items)}catch(e){fail(my)}
+  };
+  async function showArtist(w){
+    const my=++seq,back=lastItems;clearTimeout(timer);msg('Searching…');
+    const head=h('div',{class:'whead'},
+      h('button',{type:'button',class:'ic','aria-label':'Back',html:ico(I.back),onclick:()=>{seq++;back?drawResults(back):drawList()}}),
+      h('span',{class:'lt'},w.artist));
+    try{const items=await artistSongs(artRef(w));if(my===seq){drawResults(mergeSongs([items]),head);box.scrollIntoView({block:'start'})}}catch(e){fail(my)}
+  }
+  q.addEventListener('input',()=>{clearTimeout(timer);const s=q.value.trim();
+    if(!s){seq++;drawList();return}
+    timer=setTimeout(()=>search(s),450)});
+  q.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();clearTimeout(timer);const s=q.value.trim();if(s)search(s);q.blur()}});
+  drawList();
+  openSheet('Wishlist',[q,modes,box]);
+}
+$('wishBtn').onclick=openWish;
