@@ -353,6 +353,7 @@ function nameSheet(title,init,onOk,ph='Playlist name'){
 
 function openAdd(){
   const p=view==='all'?null:pl(view);
+  // only one way in (e.g. iPhone): open the phone's own picker right away, it already lists Files, Google Drive, etc.
   if(!(p&&tracks.length)&&!canFolder){$('files').click();return}
   openSheet(p?p.name:'Add songs',[acts([
     p&&tracks.length&&act(I.lib,'From library',()=>pickFromLibrary(p)),

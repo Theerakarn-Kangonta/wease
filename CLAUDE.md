@@ -68,6 +68,9 @@ the device.
 - (2026-10-25: a Wishlist with online song search (iTunes, Deezer, MusicBrainz) was added, then removed at the
   user's request: they download songs on their computer and put them in Google Drive, then pick them from the
   phone's file picker. Don't bring back online search unasked; the app makes no calls beyond fonts + tag library.)
+- Add (+): on iPhone it opens the system picker directly (that menu already lists Files, Google Drive, etc.).
+  A separate "Google Drive" button was tried on 2026-10-25 and removed: the user found it a duplicate step. The
+  Add sheet only appears when there's a real extra choice (From library in a playlist, Choose folder off iOS).
 - UI uses one bottom-sheet `<dialog id="sheet">` for all menus and confirms (no `prompt()`/`confirm()`).
 - Layout (user preference): minimal, one full-height screen, the page never scrolls. Top bar (icons only),
   playlist tabs + ⋯ menu (sort, list actions), song list scrolls inside `#listwrap`, player pinned at the
