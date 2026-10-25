@@ -27,6 +27,7 @@ const I={
   plus:'M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6z',
   vol:'M3 9v6h4l5 5V4L7 9H3zm13.5 3A4.5 4.5 0 0 0 14 7.97v8.05c1.48-.73 2.5-2.25 2.5-4.02z',
   eq:'M10 20h4V4h-4v16zm-6 0h4v-8H4v8zM16 9v11h4V9h-4z',
+  image:'M21 19V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2zM8.5 13.5l2.5 3.01L14.5 12l4.5 6H5l3.5-4.5z',
   share:'M16 5l-1.42 1.42-1.59-1.59V16h-1.98V4.83L9.42 6.42 8 5l4-4 4 4zm4 5v11a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V10a2 2 0 0 1 2-2h3v2H6v11h12V10h-3V8h3a2 2 0 0 1 2 2z',
   addBox:'M19 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V5a2 2 0 0 0-2-2zm0 16H5V5h14v14zm-8-2h2v-4h4v-2h-4V7h-2v4H7v2h4z',
   arrow:'M12 4l-1.41 1.41L16.17 11H4v2h12.17l-5.58 5.59L12 20l8-8z',
@@ -81,10 +82,14 @@ function loadPrefs(){
 
 /* ---------- storage (IndexedDB) ---------- */
 function openDB(){return new Promise(res=>{try{
-  const r=indexedDB.open('local-music',2);
+  const r=indexedDB.open('local-music',4);
   r.onupgradeneeded=()=>{const d=r.result;
     if(!d.objectStoreNames.contains('tracks'))d.createObjectStore('tracks',{keyPath:'id'});
-    if(!d.objectStoreNames.contains('playlists'))d.createObjectStore('playlists',{keyPath:'id'})};
+    if(!d.objectStoreNames.contains('playlists'))d.createObjectStore('playlists',{keyPath:'id'});
+    // user edits (title, artist, picture, thumbnail) live apart from the audio, so a song's record
+    // with its audio file is written once and never rewritten (Safari can break a re-saved audio file)
+    if(!d.objectStoreNames.contains('edits'))d.createObjectStore('edits',{keyPath:'id'});
+    if(!d.objectStoreNames.contains('waves'))d.createObjectStore('waves',{keyPath:'id'})};   // waveform per song
   r.onsuccess=()=>{const d=r.result;d.onversionchange=()=>d.close();res(d)};
   r.onerror=r.onblocked=()=>res(null);
 }catch(e){res(null)}})}
@@ -93,6 +98,10 @@ function dbPut(s,v){return new Promise(res=>{if(!db)return res(false);try{const 
 function dbDel(s,id){try{db&&db.transaction(s,'readwrite').objectStore(s).delete(id)}catch(e){}}
 function dbClear(s){try{db&&db.transaction(s,'readwrite').objectStore(s).clear()}catch(e){}}
 const savePl=p=>dbPut('playlists',p);
+function dbGet(s,id){return new Promise(res=>{if(!db)return res(null);try{const q=db.transaction(s).objectStore(s).get(id);q.onsuccess=()=>res(q.result||null);q.onerror=()=>res(null)}catch(e){res(null)}})}
+const EDIT_FIELDS=['title','artist','cover','thumb','lyrics'];
+/* save only the editable details; never the audio */
+function saveEdits(t){const e={id:t.id};for(const k of EDIT_FIELDS)e[k]=t[k]==null?null:t[k];return dbPut('edits',e)}
 
 /* ---------- metadata ---------- */
 function readTags(file){return new Promise(res=>{
@@ -104,7 +113,8 @@ function readTags(file){return new Promise(res=>{
       let cover=null;
       if(tags.picture){try{const d=tags.picture.data;let s='';for(let i=0;i<d.length;i++)s+=String.fromCharCode(d[i]);
         cover='data:'+tags.picture.format+';base64,'+btoa(s)}catch(e){}}
-      res({title:String(tags.title||guess.title),artist:String(tags.artist||guess.artist),cover});
+      let ly=tags.lyrics;if(ly&&typeof ly==='object')ly=ly.lyrics;
+      res({title:String(tags.title||guess.title),artist:String(tags.artist||guess.artist),cover,lyrics:typeof ly==='string'&&ly.trim()?ly:null});
     },onError:()=>res({...guess,cover:null})})}catch(e){res({...guess,cover:null})}
 })}
 
@@ -114,8 +124,14 @@ function addTrackObj(t){if(!t.added)t.added=parseInt(t.id,10)||0;tracks.push(t);
 
 async function addFiles(list){
   const target=view==='all'?null:pl(view);
-  const files=[...list].filter(isAudio)
+  const all=[...list],baseOf=n=>String(n).replace(/\.[^./]+$/,'').toLowerCase();
+  const lrcs=new Map(all.filter(f=>/\.lrc$/i.test(f.name)).map(f=>[baseOf(f.name),f]));
+  const files=all.filter(isAudio)
     .sort((a,b)=>coll.compare(a.webkitRelativePath||a.name,b.webkitRelativePath||b.name));
+  if(!files.length&&lrcs.size){   // only .lrc files: attach them to songs already in the library
+    let n=0;for(const t of tracks){const f=lrcs.get(baseOf(t.name));if(f){try{t.lyrics=await f.text();saveEdits(t);n++}catch(e){}}}
+    updLyrBtn();renderLyrics();toast(n?'Added lyrics to '+n+(n===1?' song':' songs'):'No songs match these lyric files');return;
+  }
   if(!files.length){toast('No music files found');return}
   const have=new Map(tracks.map(t=>[t.name+'|'+(t.blob&&t.blob.size),t.id]));
   const ids=[];let added=0,saved=0,skipped=0;
@@ -124,6 +140,8 @@ async function addFiles(list){
     const key=f.name+'|'+f.size;
     if(have.has(key)){skipped++;ids.push(have.get(key));continue}
     const tag=await readTags(f);
+    Object.assign(tag,await coverSet(tag.cover));
+    const lf=lrcs.get(baseOf(f.name));if(lf)try{tag.lyrics=await lf.text()}catch(e){}
     const t={id:newId(),name:f.name,added:Date.now(),...tag,blob:f};
     addTrackObj(t);have.set(key,t.id);ids.push(t.id);added++;
     if(await dbPut('tracks',t))saved++;
@@ -206,9 +224,9 @@ function render(){
   const ol=$('list'),frag=document.createDocumentFragment();
   for(const id of ids){
     const t=byId.get(id);
-    if(q&&!(t.title+' '+t.artist+' '+t.name).toLowerCase().includes(q))continue;
+    if(q&&!(t.title+' '+t.artist+' '+t.name+' '+(t.lyrics||'')).toLowerCase().includes(q))continue;
     frag.append(h('li',{'data-id':id,html:
-      `<button class="main" type="button"><span class="thumb">${t.cover?`<img src="${esc(t.cover)}" alt="">`:ico(I.note)}<span class="eq"><i></i><i></i><i></i></span></span>`+
+      `<button class="main" type="button"><span class="thumb">${t.cover?`<img src="${esc(t.thumb||t.cover)}" alt="" loading="lazy" decoding="async">`:ico(I.note)}<span class="eq"><i></i><i></i><i></i></span></span>`+
       `<span class="meta"><span class="lt">${esc(t.title)}</span><span class="la">${esc(t.artist||'Unknown artist')}</span></span></button>`+
       (canDrag?`<span class="grip" role="img" aria-label="Drag to reorder">${ico(I.grip)}</span>`:'')+
       `<button class="more" type="button" aria-label="Options for ${esc(t.title)}">${ico(I.more)}</button>`}));
@@ -278,7 +296,7 @@ function startDrag(e,li,grip){
 
 function removeTrack(id){
   const t=byId.get(id);if(!t)return;
-  dbDel('tracks',id);tracks=tracks.filter(x=>x!==t);byId.delete(id);
+  dbDel('tracks',id);dbDel('edits',id);dbDel('waves',id);waveMem.delete(id);tracks=tracks.filter(x=>x!==t);byId.delete(id);
   for(const p of playlists)if(p.ids.includes(id)){p.ids=p.ids.filter(x=>x!==id);savePl(p)}
   if(prefs.songEq[id]){delete prefs.songEq[id];savePrefs()}
   if(id===curId){
@@ -290,7 +308,7 @@ function removeTrack(id){
   render();
 }
 function clearAll(){
-  dbClear('tracks');audio.pause();tracks=[];byId.clear();
+  dbClear('tracks');dbClear('edits');dbClear('waves');waveMem.clear();audio.pause();tracks=[];byId.clear();
   for(const p of playlists){p.ids=[];savePl(p)}
   prefs.songEq={};savePrefs();
   resetNP();afterChange();toast('All songs deleted');
@@ -300,8 +318,8 @@ function resetNP(){
   $('npTitle').textContent=$('npArtist').textContent='';
   $('disc').innerHTML='<div class="label"></div>';audio.removeAttribute('src');
   if(url){URL.revokeObjectURL(url);url=null}
-  $('cur').textContent=$('dur').textContent='0:00';$('pos').value=0;setFill($('pos'));
-  $('player').hidden=true;
+  $('cur').textContent=$('dur').textContent='0:00';wavePeaks=null;waveFor=null;drawWave();
+  $('player').hidden=true;setBackdrop(null);
 }
 
 /* ---------- sheets (bottom dialogs) ---------- */
@@ -356,12 +374,72 @@ function trackMenu(id){
   const isPlaying=id===curId&&!audio.paused;
   openSheet(t.title,[acts([
     act(isPlaying?I.pause:I.play,isPlaying?'Pause':'Play',()=>{closeSheet();id===curId?togglePlay():playFrom(id)}),
+    act(I.edit,'Edit details',()=>editSong(id)),
     act(I.plAdd,'Add to playlist',()=>playlistPicker([id])),
     soundRow(id),
     up,down,
     p&&act(I.minus,'Remove from playlist',()=>{p.ids=p.ids.filter(x=>x!==id);savePl(p);closeSheet();afterChange()}),
     act(I.del,'Delete song',()=>confirmSheet('Delete “'+t.title+'”?','Delete',()=>removeTrack(id)),'danger'),
   ])],t.artist||'Unknown artist');
+}
+
+/* edit a song's title, artist and picture */
+/* centre-crop any image URL to a square JPEG data URL of at most `size` px */
+function imgToSquare(src,size,q=0.85){return new Promise((res,rej)=>{
+  const im=new Image();
+  im.onload=()=>{try{
+    const s=Math.min(im.naturalWidth,im.naturalHeight),out=Math.min(size,s),c=document.createElement('canvas');
+    c.width=c.height=out;const x=c.getContext('2d');x.imageSmoothingQuality='high';
+    x.drawImage(im,(im.naturalWidth-s)/2,(im.naturalHeight-s)/2,s,s,0,0,out,out);
+    res(c.toDataURL('image/jpeg',q));
+  }catch(e){rej(e)}};
+  im.onerror=()=>rej(new Error('bad image'));
+  im.src=src;
+})}
+async function squareImage(file,size){
+  const u=URL.createObjectURL(file);
+  try{return await imgToSquare(u,size)}finally{URL.revokeObjectURL(u)}
+}
+/* covers: player picture max 512 px, plus a tiny thumbnail for the list so scrolling stays light */
+async function coverSet(src){
+  if(!src)return{cover:null,thumb:null};
+  try{const cover=src.length>120000?await imgToSquare(src,512):src;return{cover,thumb:await imgToSquare(cover,128,0.8)}}
+  catch(e){return{cover:src,thumb:null}}
+}
+function editSong(id,toLyrics){
+  const t=byId.get(id);if(!t)return;
+  let cover=t.cover||null;
+  const pick=h('input',{type:'file',accept:'image/*',class:'vh',tabindex:'-1','aria-hidden':'true'});
+  const pic=h('button',{type:'button',class:'cover-edit','aria-label':'Change picture',onclick:()=>pick.click()});
+  const rm=h('button',{type:'button',class:'linkbtn',onclick:()=>{cover=null;draw()}},'Remove picture');
+  const draw=()=>{pic.innerHTML=cover?`<img src="${esc(cover)}" alt="">`:ico(I.image);rm.hidden=!cover};
+  pick.addEventListener('change',async e=>{
+    const f=e.target.files&&e.target.files[0];e.target.value='';if(!f)return;
+    try{cover=await squareImage(f,512);draw()}catch(_){toast("Can't use this picture")}
+  });
+  const ti=h('input',{class:'field',type:'text',value:t.title,maxlength:150,placeholder:'Title','aria-label':'Title',autocomplete:'off'});
+  const ar=h('input',{class:'field',type:'text',value:t.artist||'',maxlength:150,placeholder:'Artist','aria-label':'Artist',autocomplete:'off'});
+  const ly=h('textarea',{class:'field area',rows:7,placeholder:'Paste lyrics here. Lines with times like [01:23.45] will follow the song.','aria-label':'Lyrics'});ly.value=t.lyrics||'';
+  const lyPick=h('input',{type:'file',accept:'.lrc,.txt,text/plain',class:'vh',tabindex:'-1','aria-hidden':'true'});
+  lyPick.addEventListener('change',async e=>{const f=e.target.files&&e.target.files[0];e.target.value='';if(!f)return;try{ly.value=await f.text()}catch(_){toast("Can't read this file")}});
+  const form=h('form',{class:'grp',onsubmit:async e=>{
+      e.preventDefault();
+      t.title=ti.value.trim()||t.title;t.artist=ar.value.trim();t.lyrics=ly.value.trim()||null;
+      if(cover!==t.cover)Object.assign(t,await coverSet(cover));
+      closeSheet();render();if(id===curId){showNowPlaying(t);updLyrBtn();renderLyrics()}
+      toast(await saveEdits(t)?'Saved':'Saved until you close the app');
+    }},
+    h('div',{class:'cover-row'},pic,h('div',{class:'cover-acts'},
+      h('button',{type:'button',class:'btn',onclick:()=>pick.click()},'Choose picture'),rm)),
+    pick,
+    h('h4',{},'Title'),ti,
+    h('h4',{},'Artist'),ar,
+    h('h4',{},'Lyrics'),ly,
+    h('button',{type:'button',class:'linkbtn',style:'align-self:flex-start',onclick:()=>lyPick.click()},'Import .lrc or .txt file'),lyPick,
+    h('div',{class:'sheet-ft'},h('button',{type:'button',class:'btn',onclick:closeSheet},'Cancel'),h('button',{type:'submit',class:'btn primary'},'Save')));
+  openSheet('Edit details',[form]);
+  if(toLyrics)setTimeout(()=>{ly.scrollIntoView({block:'center'});ly.focus()},120);
+  draw();
 }
 
 /* per-song sound profile */
@@ -464,13 +542,18 @@ function load(id,play){
   curId=id;
   if(url)URL.revokeObjectURL(url);
   url=URL.createObjectURL(t.blob);audio.src=url;applyRate();applyEq();updTune();
-  $('npTitle').textContent=t.title;$('npArtist').textContent=t.artist||'Unknown artist';
-  $('disc').innerHTML=t.cover?`<img src="${esc(t.cover)}" alt="">`:'<div class="label"></div>';
-  $('player').hidden=false;
-  if('mediaSession' in navigator){try{navigator.mediaSession.metadata=new MediaMetadata({title:t.title,artist:t.artist||'',album:'Wease',artwork:t.cover?[{src:t.cover,sizes:'512x512'}]:[]})}catch(e){}}
+  showNowPlaying(t);showWave(id);
   prefs.lastId=id;prefs.lastView=queueView;savePrefs();
   if(play)audio.play().catch(()=>{});
   markPlaying();
+}
+/* title, artist and picture in the player and on the lock screen */
+function showNowPlaying(t){
+  $('npTitle').textContent=t.title;$('npArtist').textContent=t.artist||'Unknown artist';
+  $('disc').innerHTML=t.cover?`<img src="${esc(t.cover)}" alt="">`:'<div class="label"></div>';
+  $('disc').classList.toggle('spin',!audio.paused);
+  $('player').hidden=false;setBackdrop(t);updLyrBtn();renderLyrics();
+  if('mediaSession' in navigator){try{navigator.mediaSession.metadata=new MediaMetadata({title:t.title,artist:t.artist||'',album:'Wease',artwork:t.cover?[{src:t.cover,sizes:'512x512'}]:[]})}catch(e){}}
 }
 function step(dir,auto){
   if(!order.length){if(!tracks.length)return;startQueue(view)}
@@ -538,12 +621,14 @@ function buildGraph(){
   const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return false;
   let src=null;
   try{
-    ac=new AC();src=ac.createMediaElementSource(audio);
+    // 'playback' asks for a bigger audio buffer: music no longer skips when the screen is busy (e.g. scrolling)
+    try{ac=new AC({latencyHint:'playback'})}catch(_){ac=new AC()}
+    src=ac.createMediaElementSource(audio);
     preGain=ac.createGain();outGain=ac.createGain();
     eqFilters=BANDS.map(b=>{const f=ac.createBiquadFilter();f.type=b.t;f.frequency.value=b.f;if(b.t==='peaking')f.Q.value=1.1;return f});
     const chain=[preGain,...eqFilters,outGain,ac.destination];
     src.connect(chain[0]);for(let i=0;i<chain.length-1;i++)chain[i].connect(chain[i+1]);
-    ac.onstatechange=()=>{if(ac.state!=='running'&&!audio.paused)ac.resume().catch(()=>{})};
+    ac.onstatechange=()=>{if(ac.state!=='running'&&ac.state!=='closed'&&!audio.paused)resumeSoon()};
     if(canVolume)audio.volume=1;
     applyEq();restoreVolume();
     return true;
@@ -553,7 +638,18 @@ function buildGraph(){
   }
 }
 /* call from a tap (play, next…): builds the graph if wanted and wakes it up */
-function wakeAudio(){if(needGraph())buildGraph();if(ac&&ac.state!=='running')ac.resume().catch(()=>{})}
+function wakeAudio(){setAudioSession();if(needGraph())buildGraph();if(ac&&ac.state!=='running')ac.resume().catch(()=>{})}
+/* iPhone may pause the audio engine for a moment when the app goes to the background or the screen locks.
+   Wake it up once, a little later, instead of fighting the system in a tight loop. */
+let resumeTimer=0;
+function resumeSoon(){
+  if(resumeTimer)return;
+  resumeTimer=setTimeout(()=>{resumeTimer=0;if(ac&&ac.state!=='running'&&!audio.paused)ac.resume().catch(()=>{})},250);
+}
+document.addEventListener('visibilitychange',()=>{if(ac&&ac.state!=='running'&&!audio.paused)ac.resume().catch(()=>{})});
+/* Tell Safari this page plays music (not short sound effects): it then keeps audio going in the
+   background and on the lock screen, and ignores the silent switch, like a music app. */
+function setAudioSession(){try{if(navigator.audioSession&&navigator.audioSession.type!=='playback')navigator.audioSession.type='playback'}catch(e){}}
 function applyEq(){
   if(!ac||!eqFilters.length)return;
   const a=activeEq(),g=a.on?a.gains:[0,0,0,0,0];
@@ -663,8 +759,10 @@ audio.addEventListener('loadedmetadata',()=>{$('dur').textContent=fmt(audio.dura
 audio.addEventListener('ratechange',updPos);
 audio.addEventListener('seeked',updPos);
 audio.addEventListener('timeupdate',()=>{
-  $('cur').textContent=fmt(audio.currentTime);
-  if(!seeking&&audio.duration){$('pos').value=audio.currentTime/audio.duration*1000;setFill($('pos'))}
+  if(!audio.paused)lastTick=Date.now();
+  if(!scrubbing)$('cur').textContent=fmt(audio.currentTime);
+  syncLyrics();
+  if(!scrubbing&&audio.duration)setWaveProgress(audio.currentTime/audio.duration);
   checkSleep();
 });
 audio.addEventListener('ended',()=>{
@@ -672,11 +770,127 @@ audio.addEventListener('ended',()=>{
   if(prefs.repeat===2){audio.currentTime=0;audio.play().catch(()=>{});return}
   step(1,true);
 });
-audio.addEventListener('error',()=>{if(curId&&audio.getAttribute('src'))toast("Can't play this file")});
+/* if a song breaks mid-play (e.g. the browser dropped its file), reload it from storage once and carry on */
+let lastTick=0,recovering=null;
+audio.addEventListener('playing',()=>{lastTick=Date.now();if(recovering===curId)setTimeout(()=>{if(!audio.paused)recovering=null},3000)});
+audio.addEventListener('error',async()=>{
+  if(!curId||!audio.getAttribute('src'))return;
+  const id=curId,t=byId.get(id);
+  if(recovering===id||!t){toast("Can't play this file");return}
+  recovering=id;
+  const pos=audio.currentTime||0,resume=Date.now()-lastTick<4000;
+  const rec=await dbGet('tracks',id);
+  if(curId!==id)return;
+  if(!rec||!rec.blob||!rec.blob.size){toast("Can't play this file. Try adding it again.");return}
+  t.blob=rec.blob;
+  if(url)URL.revokeObjectURL(url);
+  url=URL.createObjectURL(t.blob);audio.src=url;applyRate();
+  audio.addEventListener('loadedmetadata',()=>{try{audio.currentTime=pos}catch(e){}if(resume)audio.play().catch(()=>{})},{once:true});
+});
 
-let seeking=false;
-$('pos').addEventListener('input',()=>{seeking=true;setFill($('pos'));if(audio.duration)$('cur').textContent=fmt($('pos').value/1000*audio.duration)});
-$('pos').addEventListener('change',()=>{if(audio.duration)audio.currentTime=$('pos').value/1000*audio.duration;seeking=false});
+/* ---------- waveform scrubber ----------
+   Each song's loudness over time (200 slices) is worked out on the device the first time it plays,
+   stored in IndexedDB ('waves'), and drawn as bars. Tall bars = loud parts, short = quiet/speech, gaps = silence.
+   Tap to jump, drag to scrub (a time bubble follows the finger), arrow keys move 5 s. */
+const WAVE_N=200,waveMem=new Map();let wavePeaks=null,waveFor=null,waveJob=null,scrubbing=false,scrubFrac=0;
+const yieldNow=()=>new Promise(r=>setTimeout(r,0));
+async function computePeaks(blob){
+  if(!blob||blob.size>60e6)return null;                  // skip huge files (hour-long mixes)
+  const OAC=window.OfflineAudioContext||window.webkitOfflineAudioContext;if(!OAC)return null;
+  const data=await blob.arrayBuffer();
+  let ctx;try{ctx=new OAC(1,1,8000)}catch(e){ctx=new OAC(1,1,22050)}   // low rate = little memory
+  const ab=await new Promise((res,rej)=>{const p=ctx.decodeAudioData(data,res,rej);if(p&&p.then)p.then(res,rej)});
+  const ch=[];for(let c=0;c<ab.numberOfChannels;c++)ch.push(ab.getChannelData(c));
+  const len=ab.length,rms=new Float32Array(WAVE_N);
+  for(let b=0;b<WAVE_N;b++){
+    const s0=Math.floor(len*b/WAVE_N),s1=Math.floor(len*(b+1)/WAVE_N),step=Math.max(1,Math.floor((s1-s0)/1500));
+    let sum=0,n=0;for(let i=s0;i<s1;i+=step){let v=0;for(const d of ch)v+=d[i];v/=ch.length;sum+=v*v;n++}
+    rms[b]=Math.sqrt(sum/(n||1));
+    if(b%50===49)await yieldNow();
+  }
+  let mx=0;for(const v of rms)mx=Math.max(mx,v);
+  const out=new Uint8Array(WAVE_N);for(let b=0;b<WAVE_N;b++)out[b]=mx?Math.round(255*Math.pow(rms[b]/mx,0.7)):0;
+  return out;
+}
+/* one at a time; result kept in memory and in IndexedDB (null = could not read, don't retry) */
+function getWave(id){
+  if(waveMem.has(id))return Promise.resolve(waveMem.get(id));
+  if(waveJob)return waveJob.then(()=>getWave(id));
+  waveJob=(async()=>{
+    const saved=await dbGet('waves',id);
+    if(saved){waveMem.set(id,saved.p||null);return saved.p||null}
+    const t=byId.get(id);if(!t)return null;
+    let p=null;try{p=await computePeaks(t.blob)}catch(e){p=null}
+    waveMem.set(id,p);dbPut('waves',{id,p});return p;
+  })().finally(()=>{waveJob=null});
+  return waveJob;
+}
+function showWave(id){
+  wavePeaks=waveMem.get(id)||null;waveFor=id;
+  $('wave').classList.toggle('loading',!waveMem.has(id));drawWave();
+  if(waveMem.has(id))return prefetchWave();
+  getWave(id).then(p=>{if(waveFor!==id)return;wavePeaks=p;$('wave').classList.remove('loading');drawWave();prefetchWave()});
+}
+function prefetchWave(){ // next song in line, in a quiet moment
+  const k=order.indexOf(curId),nx=order[(k+1)%order.length];
+  if(nx&&!waveMem.has(nx))(window.requestIdleCallback||setTimeout)(()=>getWave(nx),{timeout:5000});
+}
+/* draw the bars twice: grey (whole song) and accent (played part, revealed with a clip) */
+function drawWave(){
+  const box=$('wave'),w=box.clientWidth,hh=box.querySelector('canvas').clientHeight;if(!w||!hh)return;
+  const dpr=Math.min(3,window.devicePixelRatio||1),cs=getComputedStyle(document.documentElement);
+  const bw=3,gap=2,n=Math.max(10,Math.floor((w+gap)/(bw+gap))),off=(w-(n*(bw+gap)-gap))/2;
+  for(const [cv,color] of [[$('waveBase'),cs.getPropertyValue('--wave').trim()||'#bbb'],[$('waveTop'),cs.getPropertyValue('--accent').trim()]]){
+    cv.width=Math.round(w*dpr);cv.height=Math.round(hh*dpr);
+    const x=cv.getContext('2d');x.setTransform(dpr,0,0,dpr,0,0);x.clearRect(0,0,w,hh);x.fillStyle=color;
+    for(let i=0;i<n;i++){
+      let v=0.14;
+      if(wavePeaks){const a=Math.floor(i*WAVE_N/n),b=Math.max(a+1,Math.floor((i+1)*WAVE_N/n));v=0;for(let k=a;k<b;k++)v=Math.max(v,wavePeaks[k]);v/=255}
+      const bh=Math.max(3,v*hh),y=(hh-bh)/2,bx=off+i*(bw+gap);
+      if(x.roundRect){x.beginPath();x.roundRect(bx,y,bw,bh,1.5);x.fill()}else x.fillRect(bx,y,bw,bh);
+    }
+  }
+  setWaveProgress(scrubbing?scrubFrac:(audio.duration?audio.currentTime/audio.duration:0));
+}
+function setWaveProgress(f){
+  f=Math.min(1,Math.max(0,f||0));
+  $('waveTop').style.clipPath=`inset(0 ${(100-f*100).toFixed(2)}% 0 0)`;
+  const wv=$('wave');wv.setAttribute('aria-valuenow',Math.round(f*100));
+  if(audio.duration)wv.setAttribute('aria-valuetext',fmt(f*audio.duration)+' of '+fmt(audio.duration));
+}
+(()=>{
+  const wv=$('wave'),tip=$('waveTip');
+  const fracAt=e=>{const r=wv.getBoundingClientRect();return Math.min(1,Math.max(0,(e.clientX-r.left)/r.width))};
+  const show=f=>{
+    scrubFrac=f;setWaveProgress(f);
+    if(!audio.duration)return;
+    const t=fmt(f*audio.duration);$('cur').textContent=t;tip.textContent=t;
+    const r=wv.getBoundingClientRect(),half=tip.offsetWidth/2;
+    tip.style.left=Math.min(r.width-half,Math.max(half,f*r.width))+'px';
+  };
+  wv.addEventListener('pointerdown',e=>{
+    if(e.button>0||!audio.duration)return;
+    e.preventDefault();scrubbing=true;wv.classList.add('scrub');tip.hidden=false;
+    try{wv.setPointerCapture(e.pointerId)}catch(_){}
+    show(fracAt(e));
+  });
+  wv.addEventListener('pointermove',e=>{if(scrubbing)show(fracAt(e))});
+  const end=e=>{
+    if(!scrubbing)return;scrubbing=false;wv.classList.remove('scrub');tip.hidden=true;
+    if(e.type==='pointerup'&&audio.duration){audio.currentTime=scrubFrac*audio.duration;updPos()}
+    else setWaveProgress(audio.duration?audio.currentTime/audio.duration:0);
+  };
+  wv.addEventListener('pointerup',end);wv.addEventListener('pointercancel',end);
+  wv.addEventListener('keydown',e=>{
+    if(!audio.duration)return;
+    const d={ArrowRight:5,ArrowUp:5,ArrowLeft:-5,ArrowDown:-5,PageUp:30,PageDown:-30}[e.key];
+    if(d!=null)audio.currentTime=Math.min(audio.duration,Math.max(0,audio.currentTime+d));
+    else if(e.key==='Home')audio.currentTime=0;else if(e.key==='End')audio.currentTime=Math.max(0,audio.duration-1);else return;
+    e.preventDefault();setWaveProgress(audio.currentTime/audio.duration);
+  });
+  if(window.ResizeObserver)new ResizeObserver(()=>drawWave()).observe(wv);
+  matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change',()=>setTimeout(drawWave,50));
+})();
 
 $('play').onclick=togglePlay;
 $('next').onclick=()=>{wakeAudio();step(1)};
@@ -714,15 +928,98 @@ if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol)){
   addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
 }
 
+/* ---------- lyrics ----------
+   Lyrics come from the user's own files or typing, never from the internet:
+   built-in tags (USLT) read at import, a matching .lrc file, or the Lyrics box in Edit details.
+   Timed lines like [01:23.45] (LRC) highlight and scroll with the song; tap a line to jump there. */
+function parseLyrics(text){
+  if(!text||!String(text).trim())return null;
+  const timed=[],plain=[];let offset=0;
+  for(const raw of String(text).replace(/\r/g,'').split('\n')){
+    const off=raw.match(/^\s*\[offset:\s*([+-]?\d+)\s*\]/i);if(off){offset=+off[1]/1000;continue}
+    const stamps=[...raw.matchAll(/\[(\d{1,3}):(\d{1,2}(?:[.:]\d{1,3})?)\]/g)];
+    const txt=raw.replace(/\[[^\]]*\]/g,'').trim();
+    if(stamps.length){for(const m of stamps)timed.push({t:Math.max(0,+m[1]*60+parseFloat(m[2].replace(':','.'))-offset),text:txt})}
+    else if(!/^\s*\[[a-z#]+:.*\]\s*$/i.test(raw))plain.push(raw.trim());   // skip [ar:..] style info lines
+  }
+  if(timed.length>=3){timed.sort((a,b)=>a.t-b.t);return{synced:true,lines:timed}}
+  while(plain.length&&!plain[0])plain.shift();while(plain.length&&!plain[plain.length-1])plain.pop();
+  return plain.length?{synced:false,lines:plain.map(text=>({text}))}:null;
+}
+let lyr=null,lyrIdx=-1,lyrHold=0;
+const lyrOpen=()=>!$('lyrics').hidden;
+function updLyrBtn(){const t=curId&&byId.get(curId);$('lyrBtn').classList.toggle('has',!!(t&&parseLyrics(t.lyrics)))}
+function openLyrics(){
+  const t=curId&&byId.get(curId);if(!t)return;
+  if(!parseLyrics(t.lyrics)){
+    openSheet('Lyrics',[h('p',{class:'sub2'},'No lyrics for this song yet.'),
+      h('div',{class:'sheet-ft'},h('button',{type:'button',class:'btn primary',onclick:()=>editSong(t.id,true)},'Add lyrics'))],t.title);
+    return;
+  }
+  document.querySelector('.app').classList.add('lyr-open');$('lyrics').hidden=false;$('lyrBtn').setAttribute('aria-pressed','true');
+  renderLyrics();
+}
+function closeLyrics(){document.querySelector('.app').classList.remove('lyr-open');$('lyrics').hidden=true;$('lyrBtn').setAttribute('aria-pressed','false')}
+function renderLyrics(){
+  if(!lyrOpen())return;
+  const t=curId&&byId.get(curId),body=$('lyrBody');
+  lyr=t?parseLyrics(t.lyrics):null;lyrIdx=-1;body.replaceChildren();
+  if(!lyr){closeLyrics();return}
+  body.classList.toggle('plain',!lyr.synced);
+  lyr.lines.forEach((l,i)=>body.append(h('p',{class:'lyr-line'+(l.text?'':' gap'),'data-i':i},l.text||'• • •')));
+  body.scrollTop=0;syncLyrics(true);
+}
+function syncLyrics(force){
+  if(!lyr||!lyr.synced||!lyrOpen())return;
+  const now=audio.currentTime+0.2;let i=-1;
+  for(let k=0;k<lyr.lines.length&&lyr.lines[k].t<=now;k++)i=k;
+  if(i===lyrIdx&&!force)return;
+  const body=$('lyrBody'),prev=body.querySelector('.lyr-line.on');if(prev)prev.classList.remove('on');
+  lyrIdx=i;const el=i>=0?body.children[i]:null;if(el)el.classList.add('on');
+  if(Date.now()>lyrHold)body.scrollTo({top:Math.max(0,(el?el.offsetTop:0)-body.clientHeight*0.32),behavior:force?'auto':'smooth'});
+}
+$('lyrBtn').onclick=()=>lyrOpen()?closeLyrics():openLyrics();
+$('lyrClose').onclick=closeLyrics;
+$('lyrBody').addEventListener('click',e=>{
+  const p=e.target.closest('.lyr-line');if(!p||!lyr||!lyr.synced)return;
+  const l=lyr.lines[+p.dataset.i];if(!l)return;
+  lyrHold=0;audio.currentTime=l.t;if(audio.paused)togglePlay();syncLyrics(true);
+});
+// the user scrolls the lyrics: stop auto-scrolling for a few seconds
+for(const ev of ['wheel','touchmove','pointerdown'])$('lyrBody').addEventListener(ev,()=>{lyrHold=Date.now()+4000},{passive:true});
+audio.addEventListener('seeked',()=>syncLyrics(true));
+
+/* ---------- blurred picture background ----------
+   The playing song's picture, shrunk to a tiny image and blurred, fills the background.
+   Two layers cross-fade between songs. Songs without a picture get the plain background. */
+const bdCache=new Map();let bdFront=0,bdSrc=null;
+async function setBackdrop(t){
+  const src=t&&(t.thumb||t.cover)||null;
+  if(src===bdSrc)return;
+  bdSrc=src;
+  const layers=$('backdrop').children;
+  if(!src){for(const l of layers)l.classList.remove('show');return}
+  let tiny=bdCache.get(src);
+  if(!tiny){try{tiny=await imgToSquare(src,40,0.8)}catch(e){tiny=src}bdCache.set(src,tiny)}
+  if(bdSrc!==src)return;                     // a newer song arrived while this one was being prepared
+  const next=layers[1-bdFront];
+  next.style.backgroundImage=`url("${tiny}")`;
+  next.classList.add('show');layers[bdFront].classList.remove('show');
+  bdFront=1-bdFront;
+}
+
 /* ---------- start ---------- */
 (async()=>{
+  setAudioSession();
   loadPrefs();
   $('shuffle').setAttribute('aria-pressed',prefs.shuffle);updRepeat();
   applyRate();restoreVolume();updTune();updInstall();
-  render();
+  render();try{localStorage.removeItem('lm-moods')}catch(e){}
   db=await openDB();
   if(!db){toast("This browser can't save songs");return}
-  const[ts,ps]=await Promise.all([dbAll('tracks'),dbAll('playlists')]);
+  const[ts,ps,ed]=await Promise.all([dbAll('tracks'),dbAll('playlists'),dbAll('edits')]);
+  const edits=new Map(ed.map(e=>[e.id,e]));
+  for(const t of ts){const e=edits.get(t.id);if(e)for(const k of EDIT_FIELDS)if(k in e)t[k]=e[k]}
   ts.sort((a,b)=>((a.added||parseInt(a.id,10)||0)-(b.added||parseInt(b.id,10)||0))||(a.id<b.id?-1:1)).forEach(addTrackObj);
   playlists=ps.map(p=>({...p,ids:Array.isArray(p.ids)?p.ids:[]})).sort((a,b)=>(a.created||0)-(b.created||0));
   view=prefs.view==='all'||pl(prefs.view)?prefs.view:'all';
@@ -732,4 +1029,19 @@ if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol)){
   rebuildOrder(true);
   render();
   if(curId)load(curId,false);
+  makeMissingThumbs();
 })();
+
+/* songs added before thumbnails existed: make them once, in spare moments, never while music plays */
+async function makeMissingThumbs(){
+  const idle=()=>new Promise(r=>window.requestIdleCallback?requestIdleCallback(()=>r(),{timeout:3000}):setTimeout(r,300));
+  for(const t of tracks.slice()){
+    if(!t.cover||t.thumb)continue;
+    while(!audio.paused)await new Promise(r=>audio.addEventListener('pause',r,{once:true}));
+    await idle();
+    if(!byId.has(t.id))continue;
+    const s=await coverSet(t.cover);if(!s.thumb)continue;
+    Object.assign(t,s);saveEdits(t);
+    const img=document.querySelector(`#list li[data-id="${CSS.escape(t.id)}"] .thumb img`);if(img)img.src=t.thumb;
+  }
+}

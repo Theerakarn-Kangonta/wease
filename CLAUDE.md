@@ -7,6 +7,8 @@ the device.
 
 ## Current state
 - Project name: **Wease** (use this name in the UI, title, PWA manifest and app icon label).
+- 2026-10-25: tried a rename to "Kassandra" with a Spartan/300 theme; the user rolled it back to Wease and
+  the green style (they have a new idea). Don't reintroduce it unless asked.
 - Files (no build step): `index.html` (markup), `style.css`, `app.js`, `manifest.json`,
   `sw.js` (service worker, network-first for app files, cache-first for fonts + tag lib;
   bump `VERSION` when the file list changes), `icons/` (svg, 192, 512, maskable 512, apple-touch 180).
@@ -29,6 +31,36 @@ the device.
   (`prefs.songEq` {trackId: profileKey}, key = preset name or saved profile id), via "Use for this song" in the
   EQ sheet or "Sound" in the song ⋯ menu. A song's profile overrides the default EQ while it plays
   (`activeEq()`); deleting a profile or song cleans up these links.
+- Edit details (song ⋯ menu): change title, artist and picture. Pictures are centre-cropped to a square,
+  max 512px, saved as a JPEG data URL in the track's `cover` (same field the ID3 cover uses), stored in IndexedDB.
+- Smooth playback while scrolling (user reported stutter): AudioContext uses `latencyHint:'playback'`;
+  covers are capped at 512px and each track has a 128px `thumb` used in the list (old tracks get one
+  in idle time, only while paused); list rows use `content-visibility:auto`; animations use transform only.
+  Keep it that way: avoid animating layout properties or putting full-size images in the list.
+- iPhone background/lock stutter (user reported): `navigator.audioSession.type='playback'` (Safari 16.4+),
+  `<audio preload="auto">`, and a single delayed `ac.resume()` (no tight resume loop) when iOS suspends the
+  AudioContext. Not verifiable on desktop; needs testing on a real iPhone.
+- Background: the playing song's picture (thumb or cover), shrunk to 40px and blurred (, two
+  layers cross-fade, overlay of --bg for readability). No picture = plain background. (A mood-analysis /
+  mood-theme feature was tried on 2026-10-25 and removed at the user's request; don't bring it back unasked.)
+- IMPORTANT (iPhone bug, fixed 2026-10-25): never re-`put` a `tracks` record after import. Safari can break
+  an audio Blob that is read from IndexedDB and saved again (song stopped mid-play and never played again).
+  `tracks` records (with the Blob) are written once at import; all later changes (title, artist, cover, thumb)
+  go to the `edits` store (DB version 3) via `saveEdits()` and are merged on startup. If playback errors,
+  the app re-reads the Blob from IndexedDB once and resumes (`recovering`).
+- Waveform scrubber (replaces the old range slider `#pos`): `#wave` with two canvases (grey base + accent
+  "played" layer revealed by clip-path). Peaks: 200 RMS slices per song, decoded at 8 kHz on the device the
+  first time a song plays (`computePeaks`, files > 60 MB skipped → flat bars), cached in memory + IndexedDB
+  store `waves` (DB version 4; `{id, p: Uint8Array|null}`), next song pre-computed in idle time. Tap to jump,
+  drag to scrub with a time bubble (seeks on release), arrow keys ±5 s, role="slider" with aria-valuetext.
+- (2026-10-25: tried colouring vocal parts of the waveform with a centre-channel heuristic; the user found
+  it not accurate enough and asked to remove it. Don't bring it back unasked.)
+- Lyrics (local only, never fetched online — hard requirements 1–2): sources are built-in tags (jsmediatags
+  `tags.lyrics` / USLT, read at import), a `.lrc` with the same base file name picked with the songs (or picked
+  alone later → attached to matching existing songs), or the Lyrics box in Edit details (paste or import
+  .lrc/.txt). Stored as `t.lyrics` (string) via `edits`. `parseLyrics()` handles LRC ([mm:ss.xx], multiple
+  stamps, [offset:]); ≥3 timed lines = synced. Lyrics view (`#lyrics`) replaces tabs+list while open; current
+  line highlighted + auto-scrolled (paused 4 s after user scroll), tap a line to seek. Search also matches lyrics.
 - UI uses one bottom-sheet `<dialog id="sheet">` for all menus and confirms (no `prompt()`/`confirm()`).
 - Layout (user preference): minimal, one full-height screen, the page never scrolls. Top bar (icons only),
   playlist tabs + ⋯ menu (sort, list actions), song list scrolls inside `#listwrap`, player pinned at the

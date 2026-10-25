@@ -20,6 +20,7 @@
 <script src="app.js" defer></script>
 </head>
 <body>
+<div class="backdrop" id="backdrop" aria-hidden="true"><i></i><i></i></div>
 <div class="app">
   <header class="top">
     <h1 class="brand" id="brand">Wease</h1>
@@ -48,6 +49,11 @@
     </div>
   </main>
 
+  <section class="lyrics" id="lyrics" aria-label="Lyrics" hidden>
+    <button class="ic lyr-close" id="lyrClose" type="button" aria-label="Close lyrics"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z"/></svg></button>
+    <div class="lyr-body" id="lyrBody"></div>
+  </section>
+
   <footer class="player" id="player" hidden>
     <div class="np-row">
       <div class="disc" id="disc"><div class="label"></div></div>
@@ -55,10 +61,14 @@
         <p class="t" id="npTitle"></p>
         <p class="a" id="npArtist"></p>
       </div>
+      <button class="ic lyr-btn" id="lyrBtn" type="button" aria-label="Lyrics" aria-pressed="false"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h12v2H4zm0 4h12v2H4zm0 4h8v2H4zm14.5-4.9V16a2.5 2.5 0 1 1-1.5-2.29V7h4v2.1z"/></svg></button>
       <button class="ic tune" id="tuneBtn" type="button" aria-label="Sleep timer, speed and volume"><span class="tune-txt" id="tuneTxt" hidden></span><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17v2h6v-2H3zM3 5v2h10V5H3zm10 16v-2h8v-2h-8v-2h-2v6h2zM7 9v2H3v2h4v2h2V9H7zm14 4v-2H11v2h10zm-6-4h2V7h4V5h-4V3h-2v6z"/></svg></button>
     </div>
     <div class="seek">
-      <input id="pos" type="range" min="0" max="1000" value="0" aria-label="Seek">
+      <div class="wave loading" id="wave" role="slider" tabindex="0" aria-label="Song position" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <canvas id="waveBase"></canvas><canvas id="waveTop"></canvas>
+        <span class="wave-tip" id="waveTip" hidden>0:00</span>
+      </div>
       <div class="times"><span id="cur">0:00</span><span id="dur">0:00</span></div>
     </div>
     <div class="ctrls">
@@ -71,7 +81,7 @@
   </footer>
 </div>
 
-<input id="files" class="vh" type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac,.opus" multiple tabindex="-1" aria-hidden="true">
+<input id="files" class="vh" type="file" accept="audio/*,.mp3,.m4a,.aac,.wav,.ogg,.flac,.opus,.lrc" multiple tabindex="-1" aria-hidden="true">
 <input id="folder" class="vh" type="file" webkitdirectory multiple tabindex="-1" aria-hidden="true">
 <div class="toast" id="toast" role="status" hidden></div>
 
@@ -83,6 +93,6 @@
   <div class="sheet-bd" id="sheetBody"></div>
 </dialog>
 
-<audio id="audio" preload="metadata"></audio>
+<audio id="audio" preload="auto" playsinline></audio>
 </body>
 </html>
