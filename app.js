@@ -937,7 +937,17 @@ $('installBtn').onclick=async()=>{
   openSheet('Install Wease',[h('p',{class:'steps',html:ico(I.share)+'<span>Share</span>'+ico(I.arrow)+ico(I.addBox)+'<span>Add to Home Screen</span>'})]);
 };
 if('serviceWorker' in navigator&&/^https?:$/.test(location.protocol)){
-  addEventListener('load',()=>navigator.serviceWorker.register('sw.js').catch(()=>{}));
+  // Updates: an iPhone home-screen app often resumes without reloading, so check for a new version each time
+  // the app comes back to the front, and reload once the new one takes over (never in the middle of a song).
+  const hadSW=!!navigator.serviceWorker.controller;let swReg=null,wantReload=false;
+  const tryReload=()=>{if(wantReload&&audio.paused)location.reload()};
+  addEventListener('load',()=>navigator.serviceWorker.register('sw.js',{updateViaCache:'none'})
+    .then(r=>{swReg=r}).catch(()=>{}));
+  navigator.serviceWorker.addEventListener('controllerchange',()=>{if(hadSW){wantReload=true;tryReload()}});
+  document.addEventListener('visibilitychange',()=>{
+    if(document.visibilityState!=='visible')return;
+    tryReload();try{swReg&&swReg.update().catch(()=>{})}catch(e){}
+  });
 }
 
 /* ---------- lyrics ----------

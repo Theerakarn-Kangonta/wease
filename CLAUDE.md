@@ -11,7 +11,8 @@ the device.
   the green style (they have a new idea). Don't reintroduce it unless asked.
 - Files (no build step): `index.html` (markup), `style.css`, `app.js`, `manifest.json`,
   `sw.js` (service worker, network-first for app files, cache-first for fonts + tag lib;
-  bump `VERSION` when the file list changes), `icons/` (svg, 192, 512, maskable 512, apple-touch 180).
+  bump `VERSION` on every deploy so phones pick up the update; the app re-checks for an update each time it
+  comes to the front and reloads once the new version takes over, only while paused), `icons/` (svg, 192, 512, maskable 512, apple-touch 180).
 - UI language: English (switched from Thai on 2026-10-25 at the user's request). Keep all user-facing text in English. Fonts still cover Thai so Thai song titles display well.
 - Features: add multiple files (MP3, M4A, AAC, WAV, OGG, FLAC, OPUS), read ID3 tags
   (title, artist, cover) via jsmediatags 3.9.5 from cdnjs, fallback to filename
