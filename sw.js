@@ -1,7 +1,7 @@
 /* Wease service worker: keeps the app working offline.
    It only caches the app's own files, the Google Fonts and the tag-reading library.
    Music files are never fetched or cached here: they live in IndexedDB on the device. */
-const VERSION='wease-v25';
+const VERSION='wease-v26';
 const SHELL=['./','./index.html','./style.css','./app.js','./manifest.json',
   './icons/icon.svg','./icons/icon-192.png','./icons/icon-512.png','./icons/apple-touch-icon.png'];
 const LIB='https://cdnjs.cloudflare.com/ajax/libs/jsmediatags/3.9.5/jsmediatags.min.js';
