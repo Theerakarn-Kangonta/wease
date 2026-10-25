@@ -4,6 +4,7 @@
 
 const $=id=>document.getElementById(id);
 const audio=$('audio');
+const APP_V='v28'; // keep equal to VERSION in sw.js (shown in the Playback sheet)
 const coll=new Intl.Collator('th',{numeric:true,sensitivity:'base'});
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt=s=>{if(!isFinite(s))return'0:00';s=Math.floor(s);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
@@ -750,6 +751,8 @@ function openPlayback(){
       chips(RATES.map(r=>[r,r+'×']),prefs.rate,v=>{prefs.rate=v;applyRate();updTune();savePrefs();updPos()})),
     vol,
     acts([eqBtn]),
+    h('button',{type:'button',class:'linkbtn',style:'align-self:center',
+      onclick:()=>{toast('Updating…');setTimeout(()=>location.reload(),300)}},'Wease '+APP_V+' · Check for update'),
   ]);
   const r=$('sheetBody').querySelector('input[type=range]');if(r)setFill(r);
   updTune();
