@@ -4,7 +4,7 @@
 
 const $=id=>document.getElementById(id);
 const audio=$('audio');
-const APP_V='v28'; // keep equal to VERSION in sw.js (shown in the Playback sheet)
+const APP_V='v29'; // keep equal to VERSION in sw.js (shown in the Playback sheet)
 const coll=new Intl.Collator('th',{numeric:true,sensitivity:'base'});
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt=s=>{if(!isFinite(s))return'0:00';s=Math.floor(s);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
@@ -541,7 +541,7 @@ $('q').addEventListener('keydown',e=>{if(e.key==='Escape')closeSearch()});
 function playFrom(id){wakeAudio();queueView=view;queue=viewIds(view);curId=id;rebuildOrder(true);load(id,true)}
 function load(id,play){
   const t=byId.get(id);if(!t)return;
-  curId=id;lastLoad=Date.now();
+  curId=id;lastLoad=Date.now();goodPos=0;
   if(url)URL.revokeObjectURL(url);
   url=URL.createObjectURL(t.blob);audio.src=url;applyRate();applyEq();
   if(play)audio.play().catch(()=>setPlayingUI());   // start the sound first
@@ -647,9 +647,11 @@ function wakeAudio(){setAudioSession();if(needGraph())buildGraph();if(ac&&ac.sta
 /* iPhone may pause the audio engine for a moment when the app goes to the background or the screen locks.
    Wake it up once, a little later, instead of fighting the system in a tight loop. */
 let resumeTimer=0;
-function resumeSoon(){
-  if(resumeTimer)return;
-  resumeTimer=setTimeout(()=>{resumeTimer=0;if(ac&&ac.state!=='running'&&!audio.paused)ac.resume().catch(()=>{})},250);
+function resumeSoon(n=0){
+  if(resumeTimer||!ac)return;
+  // a few tries, further apart each time (iOS often refuses the first one)
+  resumeTimer=setTimeout(()=>{resumeTimer=0;if(ac.state==='running'||audio.paused)return;
+    ac.resume().catch(()=>{}).then(()=>{if(ac.state!=='running'&&n<3)resumeSoon(n+1)})},[250,1000,2000,4000][n]);
 }
 document.addEventListener('visibilitychange',()=>{if(ac&&ac.state!=='running'&&!audio.paused)ac.resume().catch(()=>{})});
 /* Tell Safari this page plays music (not short sound effects): it then keeps audio going in the
@@ -767,6 +769,7 @@ audio.addEventListener('ratechange',updPos);
 audio.addEventListener('seeked',updPos);
 audio.addEventListener('timeupdate',()=>{
   if(!audio.paused)lastTick=Date.now();
+  if(audio.currentTime>0)goodPos=audio.currentTime;
   if(!scrubbing)$('cur').textContent=fmt(audio.currentTime);
   syncLyrics();
   if(!scrubbing&&audio.duration)setWaveProgress(audio.currentTime/audio.duration);
@@ -778,22 +781,47 @@ audio.addEventListener('ended',()=>{
   step(1,true);
 });
 /* if a song breaks mid-play (e.g. the browser dropped its file), reload it from storage once and carry on */
-let lastTick=0,recovering=null;
+let lastTick=0,recovering=null,goodPos=0;
+/* load the current song again from storage and continue at pos */
+async function reloadCurrent(pos,resume){
+  const id=curId,t=byId.get(id);if(!t)return false;
+  const rec=await dbGet('tracks',id);
+  if(curId!==id)return true;
+  if(rec&&rec.blob&&rec.blob.size)t.blob=rec.blob;else return false;
+  if(url)URL.revokeObjectURL(url);
+  url=URL.createObjectURL(t.blob);audio.src=url;applyRate();
+  audio.addEventListener('loadedmetadata',()=>{
+    if(curId!==id)return;                                // user already moved to another song
+    try{audio.currentTime=pos}catch(e){}
+    if(resume)audio.play().catch(()=>setPlayingUI());
+  },{once:true});
+  return true;
+}
 audio.addEventListener('playing',()=>{lastTick=Date.now();if(recovering===curId)setTimeout(()=>{if(!audio.paused)recovering=null},3000)});
 audio.addEventListener('error',async()=>{
   if(!curId||!audio.getAttribute('src'))return;
   const id=curId,t=byId.get(id);
   if(recovering===id||!t){toast("Can't play this file");return}
   recovering=id;
-  const pos=audio.currentTime||0,resume=Date.now()-lastTick<4000;
-  const rec=await dbGet('tracks',id);
-  if(curId!==id)return;
-  if(!rec||!rec.blob||!rec.blob.size){toast("Can't play this file. Try adding it again.");return}
-  t.blob=rec.blob;
-  if(url)URL.revokeObjectURL(url);
-  url=URL.createObjectURL(t.blob);audio.src=url;applyRate();
-  audio.addEventListener('loadedmetadata',()=>{try{audio.currentTime=pos}catch(e){}if(resume)audio.play().catch(()=>{})},{once:true});
+  const resume=Date.now()-lastTick<4000;
+  if(!await reloadCurrent(goodPos,resume)){setPlayingUI();toast("Can't play this file. Try adding it again.")}
 });
+/* Watchdog. iPhone can silently stop the sound (audio engine paused by a call, Siri, a notification,
+   the lock screen…) while the page still thinks it is playing: button shows pause, timer frozen.
+   Every second, check the clock really moves; if it is stuck: 1) wake the audio engine,
+   2) reload the song at the same spot, 3) give up honestly: show Play so one tap starts it again. */
+let wdPos=-1,wdSince=0,wdTries=0;
+setInterval(()=>{
+  if(audio.paused||audio.ended||audio.seeking||scrubbing||!curId){wdSince=0;wdTries=0;wdPos=-1;return}
+  const t=audio.currentTime;
+  if(t!==wdPos){wdPos=t;wdSince=0;wdTries=0;return}
+  if(!wdSince){wdSince=Date.now();return}
+  if(Date.now()-wdSince<2500)return;
+  wdSince=Date.now();wdTries++;
+  if(wdTries===1&&ac&&ac.state!=='running'){ac.resume().catch(()=>{});return}
+  if(wdTries<=2){reloadCurrent(goodPos||t,true);return}
+  audio.pause();setPlayingUI(false);wdTries=0;
+},1000);
 
 /* ---------- waveform scrubber ----------
    Each song's loudness over time (200 slices) is worked out on the device the first time it plays,
@@ -846,9 +874,9 @@ function showWave(id){
   if(waveMem.has(id))return prefetchWave();
   getWave(id).then(p=>{if(waveFor!==id)return;wavePeaks=p;$('wave').classList.remove('loading');drawWave();prefetchWave()});
 }
-function prefetchWave(){ // next song in line, in a quiet moment
+function prefetchWave(){ // next song in line, in a quiet moment, only while paused (decoding a song is heavy on iPhone)
   const k=order.indexOf(curId),nx=order[(k+1)%order.length];
-  if(nx&&!waveMem.has(nx))(window.requestIdleCallback||setTimeout)(()=>getWave(nx),{timeout:5000});
+  if(nx&&!waveMem.has(nx))(window.requestIdleCallback||setTimeout)(()=>{if(audio.paused)getWave(nx)},{timeout:5000});
 }
 /* draw the bars twice: grey (whole song) and accent (played part, revealed with a clip) */
 function drawWave(){

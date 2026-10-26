@@ -44,8 +44,13 @@ the device.
   `load()` starts the sound first and defers the rest a frame, and the waveform waits ~1.5 s after a song change
   (`calm()`) before decoding. All text inputs are 16px (iOS zooms below that) and the viewport has maximum-scale=1.
 - iPhone background/lock stutter (user reported): `navigator.audioSession.type='playback'` (Safari 16.4+),
-  `<audio preload="auto">`, and a single delayed `ac.resume()` (no tight resume loop) when iOS suspends the
+  `<audio preload="auto">`, and a few delayed `ac.resume()` retries with backoff (no tight resume loop) when iOS suspends the
   AudioContext. Not verifiable on desktop; needs testing on a real iPhone.
+- Stuck-playback watchdog (2026-10-26, user reported "button shows playing but no sound, timer frozen"): every 1 s,
+  if the audio is not paused but `currentTime` hasn't moved for 2.5 s: 1) `ac.resume()`, 2) `reloadCurrent()` from
+  IndexedDB at the last good position, 3) pause and show Play so one tap restarts it. `resumeSoon()` retries with
+  backoff (0.25/1/2/4 s). Next-song waveform prefetch only runs while paused (decoding is heavy on iPhone).
+  Reproduced in Chrome by making `ac.resume()` reject after `ac.suspend()`.
 - Background: the playing song's picture (thumb or cover), shrunk to 40px and blurred (, two
   layers cross-fade, overlay of --bg for readability). No picture = plain background. (A mood-analysis /
   mood-theme feature was tried on 2026-10-25 and removed at the user's request; don't bring it back unasked.)
