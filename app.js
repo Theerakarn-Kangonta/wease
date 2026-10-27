@@ -3,8 +3,12 @@
    they are kept in IndexedDB and played through blob: URLs. */
 
 const $=id=>document.getElementById(id);
-const audio=$('audio');
-const APP_V='v29'; // keep equal to VERSION in sw.js (shown in the Playback sheet)
+/* two players so songs can overlap at the change-over (crossfade).
+   `audio` is always the one playing the current song; the other one is idle or fading out the last song. */
+const players=[$('audio'),$('audio2')];
+let audio=players[0];
+const onAudio=(type,fn)=>players.forEach(el=>el.addEventListener(type,e=>{if(el===audio)fn(e)}));
+const APP_V='v33'; // keep equal to VERSION in sw.js (shown in the Playback sheet)
 const coll=new Intl.Collator('th',{numeric:true,sensitivity:'base'});
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const fmt=s=>{if(!isFinite(s))return'0:00';s=Math.floor(s);return Math.floor(s/60)+':'+String(s%60).padStart(2,'0')};
@@ -62,7 +66,8 @@ let queue=[], order=[];      // track ids: queue = list order, order = actual pl
 let curId=null, url=null, db=null;
 const RATES=[0.5,0.75,1,1.25,1.5,1.75,2];
 const prefs={shuffle:false,repeat:0,sortAll:'added',sortList:'custom',rate:1,volume:1,view:'all',lastId:'',lastView:'all',
-  eqOn:false,eq:[0,0,0,0,0],eqPreset:'flat',eqProfiles:[],songEq:{}};
+  eqOn:false,eq:[0,0,0,0,0],eqPreset:'flat',eqProfiles:[],songEq:{},xfade:6};
+const XFADE=6; // crossfade is just On/Off; when on, songs overlap by up to 6 s
 const IOS=/iPhone|iPad|iPod/.test(navigator.userAgent)||(navigator.platform==='MacIntel'&&navigator.maxTouchPoints>1);
 const canVolume=(()=>{try{const a=document.createElement('audio');a.volume=.5;return Math.abs(a.volume-.5)<.01}catch(e){return false}})();
 const canFolder='webkitdirectory' in document.createElement('input')&&!IOS;
@@ -73,6 +78,7 @@ function loadPrefs(){
     if(p&&typeof p==='object')for(const k in prefs)if(k in p&&typeof p[k]===typeof prefs[k])prefs[k]=p[k]}catch(e){}
   if(![0,1,2].includes(prefs.repeat))prefs.repeat=0;
   if(!RATES.includes(prefs.rate))prefs.rate=1;
+  prefs.xfade=prefs.xfade?XFADE:0;
   prefs.volume=Math.min(1,Math.max(0,prefs.volume));
   if(!Array.isArray(prefs.eq)||prefs.eq.length!==5||prefs.eq.some(x=>typeof x!=='number'||!isFinite(x)))prefs.eq=[0,0,0,0,0];
   prefs.eq=prefs.eq.map(x=>Math.max(-12,Math.min(12,Math.round(x))));
@@ -126,6 +132,8 @@ function addTrackObj(t){if(!t.added)t.added=parseInt(t.id,10)||0;tracks.push(t);
 async function addFiles(list){
   const target=view==='all'?null:pl(view);
   const all=[...list],baseOf=n=>String(n).replace(/\.[^./]+$/,'').toLowerCase();
+  const libs=all.filter(f=>LIB_RE.test(f.name));
+  if(libs.length){for(const f of libs)await importLibrary(f);if(all.length===libs.length)return}
   const lrcs=new Map(all.filter(f=>/\.lrc$/i.test(f.name)).map(f=>[baseOf(f.name),f]));
   const files=all.filter(isAudio)
     .sort((a,b)=>coll.compare(a.webkitRelativePath||a.name,b.webkitRelativePath||b.name));
@@ -150,9 +158,85 @@ async function addFiles(list){
   }
   if(target){for(const id of ids)if(!target.ids.includes(id))target.ids.push(id);savePl(target)}
   afterChange();
+  analyzeLibrary();
   if(saved<added)toast('Some songs could not be saved. Storage may be full');
   else toast(added?'Added '+added+(added===1?' song':' songs'):'Already in your library');
   if(added&&saved===added&&navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
+  if(!curId&&tracks.length){startQueue(view);if(order.length)load(order[0],false)}
+}
+
+/* ---------- library backup file (.wease) ----------
+   One file with every song, its details, playlists and EQ profiles, so the whole library can be
+   kept in Drive and brought back on any phone. Layout: "WEASE1" + header length (4 bytes) + JSON header
+   + the audio files back to back (the header says where each one starts). Stays on the device. */
+const LIB_MAGIC='WEASE1',LIB_RE=/\.wease$/i;
+function exportLibrary(){
+  if(!tracks.length){toast('No songs to export');return}
+  let off=0;const parts=[];
+  const list=tracks.filter(t=>t.blob).map(t=>{
+    const w=waveMem.get(t.id);
+    const r={id:t.id,name:t.name,added:t.added,title:t.title,artist:t.artist,cover:t.cover||null,thumb:t.thumb||null,
+      lyrics:t.lyrics||null,type:t.blob.type||'',off,size:t.blob.size,wave:w?Array.from(w):null,bpm:waveBpm.get(t.id)||0};
+    off+=t.blob.size;parts.push(t.blob);return r});
+  const head=new TextEncoder().encode(JSON.stringify({app:'Wease',v:1,made:Date.now(),tracks:list,
+    playlists:playlists.map(p=>({id:p.id,name:p.name,ids:p.ids,created:p.created})),
+    eqProfiles:prefs.eqProfiles,songEq:prefs.songEq}));
+  const len=new Uint8Array(4);new DataView(len.buffer).setUint32(0,head.length,true);
+  const d=new Date(),day=d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
+  const file=new File([LIB_MAGIC,len,head,...parts],'Wease library '+day+'.wease',{type:'application/octet-stream'});
+  const download=()=>{const u=URL.createObjectURL(file),a=h('a',{href:u,download:file.name});
+    document.body.append(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(u),60000)};
+  // the share sheet lets the phone save straight to Files / Google Drive; otherwise download it
+  if(navigator.canShare&&navigator.canShare({files:[file]}))
+    navigator.share({files:[file],title:'Wease library'}).catch(e=>{if(e&&e.name!=='AbortError')download()});
+  else download();
+}
+async function importLibrary(f){
+  let head;
+  try{
+    const b=new Uint8Array(await f.slice(0,10).arrayBuffer());
+    if(new TextDecoder().decode(b.slice(0,6))!==LIB_MAGIC)throw 0;
+    const n=new DataView(b.buffer).getUint32(6,true);
+    head=JSON.parse(await f.slice(10,10+n).text());head.start=10+n;
+    if(!Array.isArray(head.tracks))throw 0;
+  }catch(e){toast("This isn't a Wease library file");return}
+  const have=new Map(tracks.map(t=>[t.name+'|'+(t.blob&&t.blob.size),t.id]));
+  const idMap=new Map();let added=0,saved=0,done=0;const total=head.tracks.length;
+  toast('Importing…');
+  for(const r of head.tracks){
+    done++;
+    if(!r||typeof r.name!=='string'||!(r.size>=0))continue;
+    const key=r.name+'|'+r.size;
+    if(have.has(key)){idMap.set(r.id,have.get(key));continue}
+    let blob;
+    // copy the bytes out so the saved song doesn't depend on the backup file staying around
+    try{blob=new Blob([await f.slice(head.start+r.off,head.start+r.off+r.size).arrayBuffer()],{type:r.type||''})}catch(e){continue}
+    const id=typeof r.id==='string'&&!byId.has(r.id)?r.id:newId();
+    const str=v=>typeof v==='string'&&v?v:null;
+    const t={id,name:r.name,added:r.added||Date.now(),title:String(r.title||r.name),artist:String(r.artist||''),
+      cover:str(r.cover),thumb:str(r.thumb),lyrics:str(r.lyrics),blob};
+    addTrackObj(t);have.set(key,id);idMap.set(r.id,id);added++;
+    if(await dbPut('tracks',t))saved++;
+    if(Array.isArray(r.wave)&&r.wave.length){const p=Uint8Array.from(r.wave);waveMem.set(id,p);if(r.bpm)waveBpm.set(id,r.bpm);dbPut('waves',{id,p,bpm:r.bpm||0})}
+    if(total>8&&done%5===0)toast('Importing… '+done+'/'+total);
+  }
+  // playlists: same playlist (or same name) gets the missing songs, others are created
+  for(const q of Array.isArray(head.playlists)?head.playlists:[]){
+    if(!q||typeof q.name!=='string')continue;
+    const ids=(Array.isArray(q.ids)?q.ids:[]).map(i=>idMap.get(i)).filter(Boolean);
+    const p=pl(q.id)||playlists.find(x=>x.name===q.name);
+    if(p){for(const i of ids)if(!p.ids.includes(i))p.ids.push(i);savePl(p)}
+    else{const n={id:typeof q.id==='string'?q.id:'p'+newId(),name:q.name,ids:[...new Set(ids)],created:q.created||Date.now()};playlists.push(n);savePl(n)}
+  }
+  for(const e of Array.isArray(head.eqProfiles)?head.eqProfiles:[])
+    if(e&&typeof e.id==='string'&&typeof e.name==='string'&&Array.isArray(e.gains)&&e.gains.length===5&&e.gains.every(x=>typeof x==='number'&&isFinite(x))&&!prefs.eqProfiles.some(x=>x.id===e.id))prefs.eqProfiles.push(e);
+  const keys=new Set(['flat',...Object.keys(PRESETS),...prefs.eqProfiles.map(x=>x.id)]);
+  if(head.songEq&&typeof head.songEq==='object')for(const[k,v]of Object.entries(head.songEq)){
+    const id=idMap.get(k);if(id&&typeof v==='string'&&keys.has(v)&&!prefs.songEq[id])prefs.songEq[id]=v}
+  savePrefs();afterChange();analyzeLibrary();
+  if(saved<added)toast('Some songs could not be saved. Storage may be full');
+  else toast(added?'Imported '+added+(added===1?' song':' songs'):'Already in your library');
+  if(added&&navigator.storage&&navigator.storage.persist)navigator.storage.persist().catch(()=>{});
   if(!curId&&tracks.length){startQueue(view);if(order.length)load(order[0],false)}
 }
 
@@ -495,12 +579,14 @@ function libMenu(){
       act(I.play,'Play playlist',()=>{closeSheet();const ids=viewIds(view);
         if(!ids.length)return openAdd();
         playFrom(prefs.shuffle?ids[Math.floor(Math.random()*ids.length)]:ids[0])}),
-      tracks.length&&act(I.lib,'Add from library',()=>pickFromLibrary(p)),
+      tracks.length>0&&act(I.lib,'Add from library',()=>pickFromLibrary(p)),
       act(I.edit,'Rename',()=>nameSheet('Rename playlist',p.name,n=>{p.name=n;savePl(p);render()})),
       act(I.del,'Delete playlist',()=>confirmSheet('Delete “'+p.name+'”?','Delete',()=>deletePlaylist(p)),'danger'),
-    ]):tracks.length?acts([
-      act(I.del,'Delete all songs',()=>confirmSheet('Delete all songs?','Delete all',clearAll),'danger'),
-    ]):null,
+    ]):acts([
+      tracks.length>0&&act(I.share,'Export library',()=>{closeSheet();exportLibrary()}),
+      act(I.down,'Import library',()=>{closeSheet();$('files').click()}),
+      tracks.length>0&&act(I.del,'Delete all songs',()=>confirmSheet('Delete all songs?','Delete all',clearAll),'danger'),
+    ]),
   ]);
 }
 
@@ -541,6 +627,7 @@ $('q').addEventListener('keydown',e=>{if(e.key==='Escape')closeSearch()});
 function playFrom(id){wakeAudio();queueView=view;queue=viewIds(view);curId=id;rebuildOrder(true);load(id,true)}
 function load(id,play){
   const t=byId.get(id);if(!t)return;
+  endMix();mixSkip=null;arrangedFor=null;
   curId=id;lastLoad=Date.now();goodPos=0;
   if(url)URL.revokeObjectURL(url);
   url=URL.createObjectURL(t.blob);audio.src=url;applyRate();applyEq();
@@ -548,7 +635,7 @@ function load(id,play){
   showNowPlaying(t);
   play?setPlayingUI(true):markPlaying();             // show "playing" right away, before iPhone confirms
   // the rest can wait a frame so the tap feels instant
-  requestAnimationFrame(()=>{if(curId!==id)return;updTune();showWave(id);prefs.lastId=id;prefs.lastView=queueView;savePrefs()});
+  requestAnimationFrame(()=>{if(curId!==id)return;updTune();showWave(id);arrangeNext();peekWave(nextAuto());prefs.lastId=id;prefs.lastView=queueView;savePrefs()});
 }
 /* title, artist and picture in the player and on the lock screen */
 function showNowPlaying(t){
@@ -590,7 +677,7 @@ function updPos(){try{if('mediaSession' in navigator&&navigator.mediaSession.set
   navigator.mediaSession.setPositionState({duration:audio.duration,playbackRate:audio.playbackRate||1,position:Math.min(audio.currentTime,audio.duration)})}catch(e){}}
 
 /* speed */
-function applyRate(){try{audio.defaultPlaybackRate=prefs.rate;audio.playbackRate=prefs.rate;audio.preservesPitch=true}catch(e){}}
+function applyRate(el=audio){try{el.defaultPlaybackRate=prefs.rate;el.playbackRate=prefs.rate;el.preservesPitch=true}catch(e){}}
 
 /* equalizer + volume through Web Audio.
    The audio graph is only built once the user turns the EQ on (or moves volume on iPhone, where
@@ -599,7 +686,8 @@ const BANDS=[{f:60,t:'lowshelf',l:'60 Hz'},{f:230,t:'peaking',l:'230 Hz'},{f:910
 const PRESETS={flat:['Flat',[0,0,0,0,0]],bass:['Bass',[7,4,0,0,0]],vocal:['Vocal',[-2,-1,3,4,1]],treble:['Treble',[0,0,0,4,7]],
   rock:['Rock',[5,2,-2,3,5]],pop:['Pop',[-1,2,4,2,-1]],acoustic:['Acoustic',[3,1,1,2,3]]};
 let ac=null,eqFilters=[],preGain=null,outGain=null;
-const needGraph=()=>prefs.eqOn||Object.keys(prefs.songEq).length>0||(!canVolume&&prefs.volume<1);
+const elGain=new Map();   // each player has its own gain, used for crossfades
+const needGraph=()=>prefs.xfade>0||prefs.eqOn||Object.keys(prefs.songEq).length>0||(!canVolume&&prefs.volume<1);
 
 /* EQ profiles = built-in presets + profiles the user saved. A song can have its own profile,
    which overrides the default EQ while that song plays. */
@@ -624,26 +712,39 @@ function deleteProfile(k){
 function buildGraph(){
   if(ac)return true;
   const AC=window.AudioContext||window.webkitAudioContext;if(!AC)return false;
-  let src=null;
+  const srcs=[];
   try{
     // 'playback' asks for a bigger audio buffer: music no longer skips when the screen is busy (e.g. scrolling)
     try{ac=new AC({latencyHint:'playback'})}catch(_){ac=new AC()}
-    src=ac.createMediaElementSource(audio);
+    for(const el of players)srcs.push(ac.createMediaElementSource(el));
     preGain=ac.createGain();outGain=ac.createGain();
     eqFilters=BANDS.map(b=>{const f=ac.createBiquadFilter();f.type=b.t;f.frequency.value=b.f;if(b.t==='peaking')f.Q.value=1.1;return f});
     const chain=[preGain,...eqFilters,outGain,ac.destination];
-    src.connect(chain[0]);for(let i=0;i<chain.length-1;i++)chain[i].connect(chain[i+1]);
+    for(let i=0;i<chain.length-1;i++)chain[i].connect(chain[i+1]);
+    srcs.forEach((sn,i)=>{const g=ac.createGain();sn.connect(g);g.connect(preGain);elGain.set(players[i],g)});
     ac.onstatechange=()=>{if(ac.state!=='running'&&ac.state!=='closed'&&!audio.paused)resumeSoon()};
-    if(canVolume)audio.volume=1;
+    if(canVolume)players.forEach(el=>el.volume=1);
     applyEq();restoreVolume();
     return true;
   }catch(e){
-    if(src&&ac)try{src.connect(ac.destination)}catch(_){}   // never leave the player silent
-    return !!src;
+    elGain.clear();
+    if(ac)for(const sn of srcs)try{sn.connect(ac.destination)}catch(_){}   // never leave the player silent
+    return srcs.length>0;
   }
 }
 /* call from a tap (play, next…): builds the graph if wanted and wakes it up */
-function wakeAudio(){setAudioSession();if(needGraph())buildGraph();if(ac&&ac.state!=='running')ac.resume().catch(()=>{})}
+function wakeAudio(){setAudioSession();if(needGraph())buildGraph();if(ac&&ac.state!=='running')ac.resume().catch(()=>{});unlockSpare()}
+/* iPhone only lets a player start by itself later if it was started once from a tap: do that with a moment of silence */
+let spareReady=false;
+function unlockSpare(){
+  if(spareReady||!prefs.xfade)return;spareReady=true;
+  const el=players.find(p=>p!==audio);if(el.getAttribute('src'))return;
+  const n=800,b=new DataView(new ArrayBuffer(44+n*2)),w=(o,t)=>[...t].forEach((c,i)=>b.setUint8(o+i,c.charCodeAt(0)));
+  w(0,'RIFF');b.setUint32(4,36+n*2,true);w(8,'WAVEfmt ');b.setUint32(16,16,true);b.setUint16(20,1,true);b.setUint16(22,1,true);
+  b.setUint32(24,8000,true);b.setUint32(28,16000,true);b.setUint16(32,2,true);b.setUint16(34,16,true);w(36,'data');b.setUint32(40,n*2,true);
+  const u=URL.createObjectURL(new Blob([b.buffer],{type:'audio/wav'}));el.src=u;
+  el.play().then(()=>el.pause()).catch(()=>{}).finally(()=>{if(el.getAttribute('src')===u){el.removeAttribute('src');try{el.load()}catch(e){}}URL.revokeObjectURL(u)});
+}
 /* iPhone may pause the audio engine for a moment when the app goes to the background or the screen locks.
    Wake it up once, a little later, instead of fighting the system in a tight loop. */
 let resumeTimer=0;
@@ -746,11 +847,14 @@ function openPlayback(){
   const sk=songProfile(curId),dp=profile(prefs.eqPreset);
   const eqName=sk?profile(sk).name:prefs.eqOn?(dp?dp.name:'Custom'):'Off';
   const eqBtn=act(I.eq,'Equalizer',openEq,'nav');eqBtn.append(h('span',{class:'navv'},eqName));
+  const xsw=h('button',{type:'button',class:'switch',role:'switch','aria-checked':String(!!prefs.xfade),'aria-label':'Crossfade',
+    onclick:()=>{prefs.xfade=prefs.xfade?0:XFADE;xsw.setAttribute('aria-checked',String(!!prefs.xfade));savePrefs();if(prefs.xfade)wakeAudio();else endMix()}});
   openSheet('Playback',[
     h('section',{class:'grp'},h('h4',{},'Sleep timer ',h('span',{id:'sleepStatus',class:'tune-txt',style:'color:var(--accent)'})),
       chips([[0,'Off'],[15,'15 min'],[30,'30 min'],[45,'45 min'],[60,'1 hr'],[90,'1.5 hr'],[-1,'End of song']],sleepMode,setSleep)),
     h('section',{class:'grp'},h('h4',{},'Speed'),
       chips(RATES.map(r=>[r,r+'×']),prefs.rate,v=>{prefs.rate=v;applyRate();updTune();savePrefs();updPos()})),
+    h('div',{class:'eqtop'},h('h4',{},'Crossfade'),xsw),
     vol,
     acts([eqBtn]),
     h('button',{type:'button',class:'linkbtn',style:'align-self:center',
@@ -762,20 +866,20 @@ function openPlayback(){
 $('tuneBtn').onclick=openPlayback;
 
 /* ---------- events ---------- */
-audio.addEventListener('play',()=>{setPlayingUI();if(ac&&ac.state!=='running')ac.resume().catch(()=>{})});
-audio.addEventListener('pause',()=>{setPlayingUI();if(sleepMode===0)restoreVolume()});
-audio.addEventListener('loadedmetadata',()=>{$('dur').textContent=fmt(audio.duration);applyRate();updPos()});
-audio.addEventListener('ratechange',updPos);
-audio.addEventListener('seeked',updPos);
-audio.addEventListener('timeupdate',()=>{
+onAudio('play',()=>{setPlayingUI();if(ac&&ac.state!=='running')ac.resume().catch(()=>{})});
+onAudio('pause',()=>{endMix();setPlayingUI();if(sleepMode===0)restoreVolume()});
+onAudio('loadedmetadata',()=>{$('dur').textContent=fmt(audio.duration);applyRate();updPos()});
+onAudio('ratechange',updPos);
+onAudio('seeked',updPos);
+onAudio('timeupdate',()=>{
   if(!audio.paused)lastTick=Date.now();
   if(audio.currentTime>0)goodPos=audio.currentTime;
   if(!scrubbing)$('cur').textContent=fmt(audio.currentTime);
   syncLyrics();
   if(!scrubbing&&audio.duration)setWaveProgress(audio.currentTime/audio.duration);
-  checkSleep();
+  checkSleep();maybeMix();
 });
-audio.addEventListener('ended',()=>{
+onAudio('ended',()=>{
   if(sleepMode===-1){setSleep(0);return}
   if(prefs.repeat===2){audio.currentTime=0;audio.play().catch(()=>{});return}
   step(1,true);
@@ -797,8 +901,8 @@ async function reloadCurrent(pos,resume){
   },{once:true});
   return true;
 }
-audio.addEventListener('playing',()=>{lastTick=Date.now();if(recovering===curId)setTimeout(()=>{if(!audio.paused)recovering=null},3000)});
-audio.addEventListener('error',async()=>{
+onAudio('playing',()=>{lastTick=Date.now();if(recovering===curId)setTimeout(()=>{if(!audio.paused)recovering=null},3000)});
+onAudio('error',async()=>{
   if(!curId||!audio.getAttribute('src'))return;
   const id=curId,t=byId.get(id);
   if(recovering===id||!t){toast("Can't play this file");return}
@@ -823,11 +927,145 @@ setInterval(()=>{
   audio.pause();setPlayingUI(false);wdTries=0;
 },1000);
 
+/* ---------- crossfade ----------
+   Near the end of a song the next one starts on the spare player and the two overlap: the old one
+   fades out while the new one fades in (equal-power curves, so the loudness stays even).
+   Silence at the end of a song and at the start of the next is skipped, using the saved waveform. */
+const QUIET=31;   // waveform level (0-255) counted as silence: about 5% of the song's loudest part
+let xf=null,mixing=null,mixSkip=null;   // xf = old player fading out; mixing = song being started
+function loudEdges(id){   // where the sound really starts and ends, as fractions of the song
+  const p=waveMem.get(id);if(!p)return[0,1];
+  let a=0,b=p.length-1;while(a<b&&p[a]<QUIET)a++;while(b>a&&p[b]<QUIET)b--;
+  return[a/p.length,(b+1)/p.length];
+}
+function peekWave(id){if(id&&!waveMem.has(id))dbGet('waves',id).then(r=>{if(r&&!waveMem.has(id)){waveMem.set(id,r.p||null);if(r.bpm)waveBpm.set(id,r.bpm)}})}
+function nextAuto(){   // the song that will play next by itself, or null
+  if(prefs.repeat===2||sleepMode===-1||!order.length)return null;
+  const k=order.indexOf(curId);if(k<0)return null;
+  const nx=k+1<order.length?order[k+1]:prefs.repeat===1?order[0]:null;
+  return nx===curId?null:nx;
+}
+const FADE_IN=new Float32Array(64).map((_,i)=>Math.pow(Math.sin(i/63*Math.PI/2),2));   // slow start, smooth finish
+/* When to bring in the next song. The current song always plays at full volume until its sound ends, so the
+   last words are never cut. The next song starts fading in at the cue: after the last sung line (synced lyrics),
+   after the last loud part (where the outro begins), and at most `xfade` seconds before the sound ends. */
+function mixPlan(id,d){
+  const[e0,e1]=loudEdges(id),end=Math.max(d*e1,d-15);   // skip at most 15 s of silence at the end
+  let cue=end-prefs.xfade;
+  const p=waveMem.get(id);
+  if(p){
+    const a=Math.round(e0*p.length),b=Math.round(e1*p.length),lv=[...p.slice(a,b)].sort((x,y)=>x-y);
+    const ref=lv[Math.floor(lv.length*0.75)]||0;           // the song's typical "loud" level
+    let i=b-1;while(i>a&&p[i]<ref*0.85)i--;                // last loud moment
+    cue=Math.max(cue,(i+1)/p.length*d);
+  }
+  const t=byId.get(id),ly=t&&parseLyrics(t.lyrics);
+  if(ly&&ly.synced){
+    const L=ly.lines,last=L[L.length-1];
+    if(last.t<end){
+      const gaps=L.slice(1).map((l,i)=>l.t-L[i].t).filter(g=>g>0.5).sort((x,y)=>x-y);
+      const len=Math.min(8,Math.max(2,gaps[Math.floor(gaps.length/2)]||4));   // how long a line usually lasts
+      cue=Math.max(cue,last.t+(last.text?len:0));          // an empty last line marks where singing stops
+    }
+  }
+  return{cue:Math.min(cue,end-1.5),end};
+}
+let plan=null;
+function maybeMix(){
+  if(!prefs.xfade||xf||mixing||audio.paused||scrubbing||!ac||ac.state!=='running'||!elGain.size||!curId||mixSkip===curId)return;
+  const d=audio.duration;if(!isFinite(d)||d<20)return;
+  const known=waveMem.has(curId);
+  if(!plan||plan.id!==curId||plan.known!==known||plan.d!==d)plan={id:curId,known,d,...mixPlan(curId,d)};
+  if(audio.currentTime<plan.cue)return;
+  const nx=nextAuto(),t=nx&&byId.get(nx);if(!t||!t.blob)return;
+  startMix(nx,t,plan.end);
+}
+function startMix(id,t,endAt){
+  const old=audio,from=curId,el=players.find(p=>p!==old),gNew=elGain.get(el),gOld=elGain.get(old);
+  const u=URL.createObjectURL(t.blob);mixing=id;
+  let done=false;
+  const fail=()=>{if(done)return;done=true;mixing=null;mixSkip=from;   // let this song end normally instead
+    try{el.pause()}catch(e){}el.removeAttribute('src');try{el.load()}catch(e){}URL.revokeObjectURL(u);
+    gNew.gain.cancelScheduledValues(0);gNew.gain.value=1};
+  const stillOk=()=>audio===old&&curId===from&&!old.paused;
+  gNew.gain.cancelScheduledValues(0);gNew.gain.value=0;
+  el.addEventListener('error',fail,{once:true});
+  setTimeout(()=>{if(!done){try{el.pause()}catch(e){}fail()}},5000);   // never wait forever for the next song to start
+  el.addEventListener('loadedmetadata',()=>{
+    if(done)return;if(!stillOk())return fail();
+    try{el.currentTime=Math.min(10,loudEdges(id)[0]*el.duration)}catch(e){}   // skip up to 10 s of silent intro
+    el.play().then(()=>{
+      if(done)return;if(!stillOk())return fail();
+      done=true;mixing=null;
+      // old song: full volume until its sound ends, then a short fade over the silence; new song: gradual fade-in
+      const now=ac.currentTime,left=Math.max(0.3,(endAt-old.currentTime)/(old.playbackRate||1)),F=Math.max(1.5,left);
+      gNew.gain.setValueCurveAtTime(FADE_IN,now,F);
+      gOld.gain.cancelScheduledValues(now);gOld.gain.setValueAtTime(1,now);gOld.gain.setValueAtTime(1,now+left);
+      gOld.gain.linearRampToValueAtTime(0,now+left+0.4);
+      xf={el:old,url,timer:setTimeout(endMix,(Math.max(F,left+0.4)+0.2)*1000)};
+      audio=el;url=u;curId=id;lastLoad=Date.now();goodPos=0;
+      $('dur').textContent=fmt(el.duration);applyEq();
+      showNowPlaying(t);setPlayingUI(true);updPos();
+      requestAnimationFrame(()=>{if(curId!==id)return;updTune();showWave(id);arrangeNext();peekWave(nextAuto());prefs.lastId=id;savePrefs()});
+    },fail);
+  },{once:true});
+  el.src=u;applyRate(el);
+}
+/* Shuffle with crossfade on: instead of a random next song, pick one whose sound flows from this one:
+   how this song ends vs. how the other starts, overall loudness and dynamics, and tempo. */
+const featCache=new WeakMap();
+const avg=a=>a.reduce((x,y)=>x+y,0)/(a.length||1);
+function songFeat(id){
+  const p=waveMem.get(id);if(!p)return null;
+  let f=featCache.get(p);if(f)return f;
+  const[e0,e1]=loudEdges(id),a=Math.round(e0*p.length),b=Math.max(a+1,Math.round(e1*p.length));
+  const seg=[...p.slice(a,b)].map(v=>v/255),m=avg(seg),n=Math.max(1,Math.round(seg.length*0.1));
+  f={mean:m,sd:Math.sqrt(avg(seg.map(v=>(v-m)*(v-m)))),intro:avg(seg.slice(0,n)),outro:avg(seg.slice(-n))};
+  featCache.set(p,f);return f;
+}
+function flowDist(a,b,ba,bb){
+  let d=2*Math.abs(a.outro-b.intro)+Math.abs(a.mean-b.mean)+Math.abs(a.sd-b.sd);
+  if(ba&&bb){let r=Math.abs(Math.log2(bb/ba));r=Math.min(r,Math.abs(r-1));d+=3*r}   // half/double tempo also fits
+  return d;
+}
+let arrangedFor=null;
+function arrangeNext(){
+  if(!prefs.shuffle||!prefs.xfade||prefs.repeat===2||arrangedFor===curId)return;
+  const k=order.indexOf(curId),cur=songFeat(curId);if(k<0||!cur||k+1>=order.length)return;
+  arrangedFor=curId;
+  const bc=waveBpm.get(curId)||0;
+  const rest=order.slice(k+1).map(id=>({id,f:songFeat(id)})).filter(x=>x.f)
+    .map(x=>({id:x.id,d:flowDist(cur,x.f,bc,waveBpm.get(x.id)||0)})).sort((x,y)=>x.d-y.d);
+  if(!rest.length)return;
+  const near=rest.filter(x=>x.d<=rest[0].d+0.25);           // the best match, or one about as good, so it varies
+  const pick=near[Math.floor(Math.random()*near.length)].id;
+  order.splice(order.indexOf(pick),1);order.splice(k+1,0,pick);
+}
+/* songs that were never played have no waveform yet: work them out one at a time, only while paused */
+let analyzing=false;
+async function analyzeLibrary(){
+  if(analyzing)return;analyzing=true;
+  try{
+    for(const t of tracks.slice()){
+      if(waveMem.has(t.id)||!byId.has(t.id))continue;
+      while(!audio.paused||!prefs.xfade)await new Promise(r=>setTimeout(r,5000));
+      await getWave(t.id);
+    }
+  }finally{analyzing=false}
+}
+/* the old song has faded out (or the user tapped something): stop it, free its file, both players back to full */
+function endMix(){
+  if(!xf)return;
+  const{el,url:u,timer}=xf;xf=null;clearTimeout(timer);
+  try{el.pause()}catch(e){}el.removeAttribute('src');try{el.load()}catch(e){}URL.revokeObjectURL(u);
+  for(const g of elGain.values()){g.gain.cancelScheduledValues(0);g.gain.value=1}
+}
+
 /* ---------- waveform scrubber ----------
    Each song's loudness over time (200 slices) is worked out on the device the first time it plays,
    stored in IndexedDB ('waves'), and drawn as bars. Tall bars = loud parts, short = quiet/speech, gaps = silence.
    Tap to jump, drag to scrub (a time bubble follows the finger), arrow keys move 5 s. */
-const WAVE_N=200,waveMem=new Map();let wavePeaks=null,waveFor=null,waveJob=null,scrubbing=false,scrubFrac=0;
+const WAVE_N=200,waveMem=new Map(),waveBpm=new Map();let wavePeaks=null,waveFor=null,waveJob=null,scrubbing=false,scrubFrac=0;
 const yieldNow=()=>new Promise(r=>setTimeout(r,0));
 // wait ~1.5 s after the last song change, then for an idle moment
 let lastLoad=0;
@@ -851,7 +1089,30 @@ async function computePeaks(blob){
   }
   let mx=0;for(const v of rms)mx=Math.max(mx,v);
   const out=new Uint8Array(WAVE_N);for(let b=0;b<WAVE_N;b++)out[b]=mx?Math.round(255*Math.pow(rms[b]/mx,0.7)):0;
+  await yieldNow();
+  try{out.bpm=estBpm(ch,ab.sampleRate)}catch(e){out.bpm=0}
   return out;
+}
+/* rough tempo (beats per minute) from up to 90 s in the middle of the song: how often the sound "hits".
+   0 = not sure. Used only to pick a next song that flows well. */
+function estBpm(ch,rate){
+  const hop=Math.max(1,Math.round(rate*0.016)),len=ch[0].length,sec=hop/rate;
+  const s0=Math.max(0,Math.floor(len/2-rate*45)),n=Math.floor((Math.min(len,s0+rate*90)-s0)/hop);
+  if(n<300)return 0;
+  const env=new Float32Array(n);let prev=0,mean=0;
+  for(let f=0;f<n;f++){
+    let e=0;const a=s0+f*hop;for(let i=a;i<a+hop;i++){let v=0;for(const d of ch)v+=d[i];e+=v*v}
+    e=Math.log(1e-6+e);env[f]=f?Math.max(0,e-prev):0;prev=e;mean+=env[f];
+  }
+  mean/=n;for(let f=0;f<n;f++)env[f]-=mean;
+  let best=-Infinity,bestBpm=0,sum=0,cnt=0;
+  for(let bpm=70;bpm<=180;bpm++){
+    const lag=60/(bpm*sec),l0=Math.floor(lag),fr=lag-l0;let sc=0;
+    for(let f=0;f+l0+1<n;f++)sc+=env[f]*(env[f+l0]*(1-fr)+env[f+l0+1]*fr);
+    sc*=Math.exp(-0.5*Math.pow(Math.log2(bpm/120)/0.9,2));   // gentle preference for common tempos
+    sum+=sc;cnt++;if(sc>best){best=sc;bestBpm=bpm}
+  }
+  return best>0&&best>1.5*Math.max(0,sum/cnt)?bestBpm:0;
 }
 /* one at a time; result kept in memory and in IndexedDB (null = could not read, don't retry) */
 function getWave(id){
@@ -859,12 +1120,13 @@ function getWave(id){
   if(waveJob)return waveJob.then(()=>getWave(id));
   waveJob=(async()=>{
     const saved=await dbGet('waves',id);
-    if(saved){waveMem.set(id,saved.p||null);return saved.p||null}
+    if(saved){waveMem.set(id,saved.p||null);if(saved.bpm)waveBpm.set(id,saved.bpm);return saved.p||null}
     const t=byId.get(id);if(!t)return null;
     await calm();                     // reading a whole song is heavy: let playback settle first
     if(!byId.has(id))return null;
     let p=null;try{p=await computePeaks(t.blob)}catch(e){p=null}
-    waveMem.set(id,p);dbPut('waves',{id,p});return p;
+    const bpm=p&&p.bpm||0;if(bpm)waveBpm.set(id,bpm);
+    waveMem.set(id,p);dbPut('waves',{id,p,bpm});return p;
   })().finally(()=>{waveJob=null});
   return waveJob;
 }
@@ -872,7 +1134,7 @@ function showWave(id){
   wavePeaks=waveMem.get(id)||null;waveFor=id;
   $('wave').classList.toggle('loading',!waveMem.has(id));drawWave();
   if(waveMem.has(id))return prefetchWave();
-  getWave(id).then(p=>{if(waveFor!==id)return;wavePeaks=p;$('wave').classList.remove('loading');drawWave();prefetchWave()});
+  getWave(id).then(p=>{if(waveFor!==id)return;wavePeaks=p;$('wave').classList.remove('loading');drawWave();arrangeNext();prefetchWave()});
 }
 function prefetchWave(){ // next song in line, in a quiet moment, only while paused (decoding a song is heavy on iPhone)
   const k=order.indexOf(curId),nx=order[(k+1)%order.length];
@@ -938,7 +1200,7 @@ function setWaveProgress(f){
 $('play').onclick=togglePlay;
 $('next').onclick=()=>{wakeAudio();step(1)};
 $('prev').onclick=()=>{wakeAudio();audio.currentTime>3?audio.currentTime=0:step(-1)};
-$('shuffle').onclick=()=>{prefs.shuffle=!prefs.shuffle;$('shuffle').setAttribute('aria-pressed',prefs.shuffle);rebuildOrder(true);savePrefs()};
+$('shuffle').onclick=()=>{prefs.shuffle=!prefs.shuffle;$('shuffle').setAttribute('aria-pressed',prefs.shuffle);rebuildOrder(true);arrangedFor=null;arrangeNext();savePrefs()};
 $('repeat').onclick=()=>{prefs.repeat=(prefs.repeat+1)%3;updRepeat();savePrefs()};
 function updRepeat(){$('repeat').setAttribute('aria-pressed',prefs.repeat>0);$('rbadge').textContent=prefs.repeat===2?'1':'';
   $('repeat').setAttribute('aria-label',['Repeat: off','Repeat all','Repeat one'][prefs.repeat])}
@@ -1040,7 +1302,7 @@ $('lyrBody').addEventListener('click',e=>{
 });
 // the user scrolls the lyrics: stop auto-scrolling for a few seconds
 for(const ev of ['wheel','touchmove','pointerdown'])$('lyrBody').addEventListener(ev,()=>{lyrHold=Date.now()+4000},{passive:true});
-audio.addEventListener('seeked',()=>syncLyrics(true));
+onAudio('seeked',()=>syncLyrics(true));
 
 /* ---------- blurred picture background ----------
    The playing song's picture, shrunk to a tiny image and blurred, fills the background.
@@ -1070,7 +1332,8 @@ async function setBackdrop(t){
   render();try{localStorage.removeItem('lm-moods')}catch(e){}
   db=await openDB();
   if(!db){toast("This browser can't save songs");return}
-  const[ts,ps,ed]=await Promise.all([dbAll('tracks'),dbAll('playlists'),dbAll('edits')]);
+  const[ts,ps,ed,wv]=await Promise.all([dbAll('tracks'),dbAll('playlists'),dbAll('edits'),dbAll('waves')]);
+  for(const w of wv){waveMem.set(w.id,w.p||null);if(w.bpm)waveBpm.set(w.id,w.bpm)}
   const edits=new Map(ed.map(e=>[e.id,e]));
   for(const t of ts){const e=edits.get(t.id);if(e)for(const k of EDIT_FIELDS)if(k in e)t[k]=e[k]}
   ts.sort((a,b)=>((a.added||parseInt(a.id,10)||0)-(b.added||parseInt(b.id,10)||0))||(a.id<b.id?-1:1)).forEach(addTrackObj);
@@ -1082,7 +1345,7 @@ async function setBackdrop(t){
   rebuildOrder(true);
   render();
   if(curId)load(curId,false);
-  makeMissingThumbs();
+  makeMissingThumbs();analyzeLibrary();
 })();
 
 /* songs added before thumbnails existed: make them once, in spare moments, never while music plays */
